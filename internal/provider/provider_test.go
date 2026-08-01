@@ -11,8 +11,16 @@ import (
 // testAccProtoV6ProviderFactories is used to instantiate the provider
 // during acceptance tests, which run real Terraform CLI commands against
 // this codebase (see https://developer.hashicorp.com/terraform/plugin/framework/acctests).
+//
+// The map key ("omv") is used by terraform-plugin-testing as the local
+// name for the required_providers entry it implicitly wraps each
+// resource.TestStep's Config in -- it MUST match the prefix of this
+// provider's resource/data source types (see the comment on
+// OMVProvider.Metadata in provider.go), or acceptance tests would fail
+// with the same "provider not found" class of error a real Terraform
+// config with a mismatched required_providers key would.
 var testAccProtoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServer, error){
-	"openmediavault": providerserver.NewProtocol6WithError(New("test")()),
+	"omv": providerserver.NewProtocol6WithError(New("test")()),
 }
 
 // testAccPreCheck validates that all required environment variables for

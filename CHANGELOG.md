@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Fixed:** the provider's `Metadata().TypeName` was `"openmediavault"`,
+  so the resource types it actually served over the wire were
+  `openmediavault_shared_folder`/`openmediavault_rsync_job` -- not
+  `omv_shared_folder`/`omv_rsync_job` as every example, the README, and
+  the acceptance tests assumed. Combined with a `required_providers` local
+  name that also didn't match the `omv_` prefix used in resource blocks,
+  this produced Terraform's generic "provider registry.terraform.io does
+  not have a provider named registry.terraform.io/hashicorp/omv" error
+  for anyone following the docs as written, since Terraform infers the
+  local name to look up from a resource type's prefix and falls back to
+  assuming `hashicorp/<prefix>` when nothing matches. Fixed the
+  `TypeName`, the README/example `required_providers`/`provider` blocks,
+  and the acceptance test harness's provider factory key, all to `omv`;
+  added a protocol-level test (`TestResourceTypeNamesMatchOMVPrefix`)
+  asserting the served resource type names directly so this can't silently
+  regress again. Also expanded the README's "Building" section with a
+  corrected, tested `dev_overrides` workflow for running an unpublished
+  provider locally.
+
 - Initial provider scaffolding: provider configuration/auth against OMV's
   JSON-RPC API, minimum-version (OMV >= 8) enforcement, and a template
   `omv_shared_folder` resource/data source pair demonstrating the CRUD +
@@ -18,3 +37,9 @@
   `revert_on_apply_failure` option (default off) controlling whether a
   failed deploy triggers an automatic, instance-wide revert -- verified
   against source that the OMV web UI does *not* do this by default.
+- Added `omv_rsync_job`, managing OMV's scheduled rsync jobs (`Rsync` RPC
+  service). Verified its RPC service/method/field names against the OMV
+  8.5.5 source the same way as `omv_shared_folder`. Reuses the
+  apply/revert-on-failure handling introduced above, with messaging
+  specific to rsync jobs' deploy step actually writing cron
+  jobs/scripts to disk (unlike shared folders' no-op module deploy).

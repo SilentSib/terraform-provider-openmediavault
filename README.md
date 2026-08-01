@@ -25,31 +25,70 @@ below 8.
 
 ```shell
 make build      # -> ./bin/terraform-provider-openmediavault
-make install     # builds and installs into the local Terraform plugin cache
 ```
 
-`make install` places the binary where Terraform's [development overrides]
-or local filesystem mirror lookup expects it
-(`~/.terraform.d/plugins/registry.terraform.io/example/openmediavault/<version>/<os_arch>/`).
-Update the `HOSTNAME`/`NAMESPACE`/`NAME` values in `GNUmakefile` and
-`main.go`'s `providerserver.ServeOpts.Address` once this provider has a
-real registry namespace.
+This provider isn't published to any registry, so `terraform init` can't
+just download it -- you need to point Terraform at the binary you just
+built. Two ways to do that:
 
-[development overrides]: https://developer.hashicorp.com/terraform/cli/config/config-file#development-overrides-for-provider-developers
+### Option A: `dev_overrides` (recommended for iterating locally)
+
+Add to `~/.terraformrc` (create it if it doesn't exist):
+
+```hcl
+provider_installation {
+  dev_overrides {
+    "example/openmediavault" = "/absolute/path/to/terraform-provider-openmediavault/bin"
+  }
+  direct {}
+}
+```
+
+The key is the provider's `source` address (matching `main.go`'s
+`providerserver.ServeOpts.Address` and the `source` in your
+`required_providers` block), not the `omv` local name. With this in place,
+`terraform plan`/`apply` use the binary in that directory directly --
+`terraform init` isn't even needed for this provider, and there's no
+version/checksum matching to keep in sync as you rebuild. Terraform prints
+a warning on every run reminding you an override is active; that's
+expected. Remove the `dev_overrides` block (or comment it out) once you no
+longer want to use your local build.
+
+### Option B: filesystem mirror (`make install`)
+
+```shell
+make install     # builds and installs into a local Terraform plugin mirror
+```
+
+This places the binary where Terraform's [implied local filesystem
+mirror] lookup expects it
+(`~/.terraform.d/plugins/registry.terraform.io/example/openmediavault/<version>/<os_arch>/`)
+and works with a normal `terraform init`, but -- unlike `dev_overrides` --
+the version in `GNUmakefile`'s `VERSION` variable must satisfy your
+config's `required_providers` version constraint, and you need to rerun
+`terraform init` (with `-upgrade` if the version string didn't change)
+after every rebuild.
+
+Update the `HOSTNAME`/`NAMESPACE`/`NAME` values in `GNUmakefile` and
+`main.go`'s `providerserver.ServeOpts.Address` together, and keep them
+consistent, if you rename this provider or give it a real registry
+namespace.
+
+[implied local filesystem mirror]: https://developer.hashicorp.com/terraform/cli/config/config-file#implied-local-mirror-directories
 
 ## Using the provider
 
 ```hcl
 terraform {
   required_providers {
-    openmediavault = {
+    omv = {
       source  = "example/openmediavault"
       version = "~> 0.1"
     }
   }
 }
 
-provider "openmediavault" {
+provider "omv" {
   host     = "nas.example.lan"
   username = "admin"
   # password can also come from the OMV_PASSWORD environment variable
@@ -61,7 +100,34 @@ resource "omv_shared_folder" "media" {
   relative_path  = "media/"
   comment        = "Managed by Terraform"
 }
+
+resource "omv_rsync_job" "nightly_backup" {
+  type                  = "local"
+  enabled               = true
+  comment               = "Nightly mirror to backup volume"
+  src_shared_folder_id  = omv_shared_folder.media.id
+  dest_shared_folder_id = "fs-uuid-of-the-destination-shared-folder"
+  hour                  = ["2"]
+  minute                = ["0"]
+}
 ```
+
+The `required_providers` key (`omv` above) and the `provider` block's label
+must both match the prefix used by this provider's resource/data source
+types (`omv_shared_folder`, `omv_rsync_job`, ...) -- Terraform infers which
+provider a resource belongs to from the part of its type before the first
+`_`, and only consults `source`/`version` for whichever `required_providers`
+entry has that same key. If they don't match (or the block is missing
+entirely), Terraform falls back to assuming `registry.terraform.io/hashicorp/omv`
+and fails with something like:
+
+```
+Error: Failed to query available provider packages
+Could not retrieve the list of available versions for provider hashicorp/omv
+```
+
+even though nothing in your configuration mentions `hashicorp/omv` by name.
+
 
 ### Provider configuration
 
@@ -132,13 +198,31 @@ This repository is groundwork, not a finished provider:
   staging it, so a failed post-delete `applyChanges` there is reported as
   a non-blocking warning instead, since the object is genuinely already
   gone.
-- **Only one resource/data source pair exists.** Follow the same pattern
-  (`internal/provider/shared_folder_resource.go`) to add resources for
-  users, network shares (NFS/SMB), filesystems, RAID, scheduled jobs,
+- **Two resources exist so far** (`omv_shared_folder`, `omv_rsync_job`)
+  plus one data source (`omv_shared_folder`). Follow the same pattern to
+  add resources for users, network shares (NFS/SMB), filesystems, RAID,
   etc. -- and re-verify each one's exact RPC method/field names and
   dirtied-modules list against that service's `.inc` file the same way,
-  rather than assuming they follow `ShareMgmt`'s pattern exactly (some
-  services don't use plain `get`/`set`/`delete`, e.g. `Config` itself).
+  rather than assuming they follow `ShareMgmt`/`Rsync`'s pattern exactly
+  (some services don't use plain `get`/`set`/`delete`, e.g. `Config`
+  itself).
+- **`omv_rsync_job`'s RPC calls (service `Rsync`, methods `get`/`set`/
+  `delete`) were likewise verified against the OMV 8.5.5 source**
+  (`engined/rpc/rsync.inc`, `engined/module/rsync.inc`, and the
+  `rpc.rsync`/`conf.service.rsync.job` datamodels). Notable details baked
+  into the resource: the RPC layer requires every one of ~30 fields to be
+  present on `set()` even when irrelevant to the chosen `type`/`mode`
+  (left at their zero value in that case, matching the web UI's own
+  form); `minute`/`hour`/`dayofmonth`/`month`/`dayofweek` are arrays at
+  the RPC layer despite being stored as comma-separated strings
+  internally; and unlike shared folders, the `rsync` module's deploy step
+  is **not** a no-op -- it's what actually writes the cron job and
+  wrapper script to disk, so a failed `Config.applyChanges` after a
+  rsync-job change is more consequential (a stale job could keep running
+  on its old schedule) and is called out more pointedly in that
+  resource's error/warning messages. Password auth stores the password
+  in OMV's config database in plaintext (matching OMV's own behavior);
+  prefer `authentication = "pubkey"` where possible.
 - **`go.mod` contains a number of `replace` directives** redirecting
   `golang.org/x/*`, `google.golang.org/*`, and a few `gopkg.in/*` modules
   to their GitHub mirrors. These were only needed because the sandbox

@@ -74,7 +74,19 @@ func New(version string) func() provider.Provider {
 }
 
 func (p *OMVProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
-	resp.TypeName = "openmediavault"
+	// This becomes the prefix for every resource/data source type this
+	// provider implements (via ProviderTypeName + "_shared_folder" etc. in
+	// each resource's Metadata()) -- i.e. it must be "omv" for the
+	// resource types to actually be "omv_shared_folder"/"omv_rsync_job",
+	// matching every example, README snippet, and test in this repo.
+	// This is independent of the provider's registry "source" address
+	// (main.go's providerserver.ServeOpts.Address / go.mod-less path
+	// "example/openmediavault") -- Terraform derives the local name it
+	// looks up in required_providers from a resource's type prefix (the
+	// part before the first "_"), NOT from the source address, so a
+	// required_providers entry must use "omv" as its key for Terraform to
+	// route "omv_*" resources to this provider at all.
+	resp.TypeName = "omv"
 	resp.Version = p.version
 }
 
@@ -230,6 +242,7 @@ func (p *OMVProvider) Configure(ctx context.Context, req provider.ConfigureReque
 func (p *OMVProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewSharedFolderResource,
+		NewRsyncJobResource,
 	}
 }
 

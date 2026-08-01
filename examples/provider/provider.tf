@@ -1,13 +1,18 @@
 terraform {
   required_providers {
-    openmediavault = {
+    # This key ("omv") must match the prefix of this provider's resource
+    # types (omv_shared_folder, omv_rsync_job, ...) -- Terraform uses it,
+    # not the "source" address below, to decide which provider a
+    # "resource \"omv_...\"" block belongs to. See README.md's "Using the
+    # provider" section for what goes wrong if these don't match.
+    omv = {
       source  = "example/openmediavault" # update once published to a registry
       version = "~> 0.1"
     }
   }
 }
 
-provider "openmediavault" {
+provider "omv" {
   host = "nas.example.lan"
   # port                  = 443
   # scheme                = "https"
