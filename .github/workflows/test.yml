@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+          cache: true
+      - run: go build -v ./...
+      - run: go vet ./...
+
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+          cache: true
+      - run: go test -count=1 -v ./...
+
+  # Acceptance tests need a reachable OMV >= 8 instance and are only run
+  # when the required secrets are configured on the repository. Remove the
+  # `if:` guard once you have a CI-accessible OMV target (e.g. a VM or
+  # container brought up by an earlier job in this workflow).
+  acceptance-test:
+    runs-on: ubuntu-latest
+    if: ${{ false }} # flip on once OMV_HOST/OMV_USERNAME/OMV_PASSWORD secrets exist
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+          cache: true
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - run: go test -count=1 -v -timeout 30m ./...
+        env:
+          TF_ACC: "1"
+          OMV_HOST: ${{ secrets.OMV_HOST }}
+          OMV_USERNAME: ${{ secrets.OMV_USERNAME }}
+          OMV_PASSWORD: ${{ secrets.OMV_PASSWORD }}
