@@ -66,7 +66,21 @@ var dirtiedBySharedFolderChanges = []string{"sharedfolders", "systemd"}
 // shareNameRegexp mirrors the "sharename" format validator in
 // datamodel/schema.inc: no control characters (0x00-0x1F) or
 // " \ / [ ] : | < > + = ; , * ?, and no leading or trailing space.
-var shareNameRegexp = regexp.MustCompile(`^[^\x00-\x1F"\\/\[\]:|<>+=;,*? ](.*[^\x00-\x1F"\\/\[\]:|<>+=;,*? ])?$|^[^\x00-\x1F"\\/\[\]:|<>+=;,*? ]$`)
+// shareNameRegexp mirrors the "sharename" format validator in
+// datamodel/schema.inc, verified verbatim against the PHP source (which
+// uses lookaround Go's RE2 engine doesn't support, hence the rewrite):
+//
+//	~^(?![ ])[^"\x00-\x1F\\/\[\]:|<>+=;,*?]+(?<! )$~u
+//
+// i.e. no control characters or " \ / [ ] : | < > + = ; , * ?, and no
+// leading or trailing space -- but, per that file's own comment, "All
+// other Unicode characters (incl. spaces WITHIN the name) are legal". An
+// earlier version of this regex excluded space from the character class
+// entirely, incorrectly rejecting valid names like "My Shared Folder".
+// This version only excludes space from the first/last character.
+var shareNameRegexp = regexp.MustCompile(
+	`^[^\x00-\x1F"\\/\[\]:|<>+=;,*? ]([^\x00-\x1F"\\/\[\]:|<>+=;,*?]*[^\x00-\x1F"\\/\[\]:|<>+=;,*? ])?$`,
+)
 
 func NewSharedFolderResource() resource.Resource {
 	return &SharedFolderResource{}
@@ -138,8 +152,11 @@ func (r *SharedFolderResource) Schema(_ context.Context, _ resource.SchemaReques
 				Optional: true,
 				Computed: true,
 				Default:  stringdefault.StaticString("775"),
-				Description: "Octal directory permissions for the shared folder, applied only the first time its " +
-					"directory is created. Must be one of \"700\", \"750\", \"755\", \"770\", \"775\" (OMV's default), or \"777\".",
+				Description: "Octal directory permissions for the shared folder, applied only the first time " +
+					"its directory is created -- changing this on an already-existing shared folder is " +
+					"accepted by OMV and will show up in this attribute's state, but does NOT actually " +
+					"chmod the directory again (a limitation of the underlying ShareMgmt RPC, not of this " +
+					"provider). Must be one of \"700\", \"750\", \"755\", \"770\", \"775\" (OMV's default), or \"777\".",
 				Validators: []validator.String{
 					fwvalidators.OneOf("700", "750", "755", "770", "775", "777"),
 				},
@@ -166,10 +183,20 @@ func (r *SharedFolderResource) Configure(_ context.Context, req resource.Configu
 
 // sharedFolderRPCObject is the shape of a shared folder object as consumed/
 // returned by ShareMgmt's get/set methods (see the field docs on `set` in
-// sharemgmt.inc and conf.system.sharedfolder.json). "Mode" is intentionally
-// only ever sent, never trusted from a response: it's absent from `get`'s
-// result and is only consulted by `set` the first time the directory is
-// created, so it must never be blindly overwritten from a Read.
+// sharemgmt.inc and conf.system.sharedfolder.json).
+//
+// "Mode" needs care: `set()` DOES echo it back in its response (verified
+// against source -- it's unconditionally appended to the object before
+// the response is built, defaulting to "775" if the caller didn't send
+// one), so Create/Update below do read it from the response rather than
+// assuming the request value round-tripped. But the directory's actual
+// permissions are only (re-)applied via chmod when set() creates the
+// directory for the FIRST time -- see the "mode" schema attribute's
+// description for the practical implication: changing "mode" on an
+// existing shared folder updates what OMV's config/response say the mode
+// is, without actually chmod-ing the already-existing directory. "Mode"
+// is also entirely absent from `get()`'s response (only `set()` adds it),
+// so Read never touches it.
 type sharedFolderRPCObject struct {
 	UUID         string `json:"uuid"`
 	Name         string `json:"name"`
@@ -203,9 +230,13 @@ func (r *SharedFolderResource) Create(ctx context.Context, req resource.CreateRe
 
 	plan.ID = types.StringValue(created.UUID)
 	plan.Comment = types.StringValue(created.Comment)
-	// `set`'s response doesn't echo "mode" back (see sharedFolderRPCObject's
-	// doc comment), so leave plan.Mode as-is: it's already the value we
-	// requested, and Read will never touch it either.
+	// Safe to trust here specifically because this is Create: the
+	// directory is guaranteed to be newly created, so the mode OMV echoes
+	// back is the mode that was actually chmod'd -- see the doc comment
+	// on sharedFolderRPCObject for why the same isn't true on Update.
+	if created.Mode != "" {
+		plan.Mode = types.StringValue(created.Mode)
+	}
 
 	// The object now genuinely exists in OMV's config database (and its
 	// directory was created on disk), regardless of what happens next, so
@@ -278,6 +309,16 @@ func (r *SharedFolderResource) Update(ctx context.Context, req resource.UpdateRe
 	}
 
 	plan.Comment = types.StringValue(updated.Comment)
+	// Unlike Create, this does NOT mean the directory was actually
+	// chmod'd to this value -- set() only does that the first time it
+	// creates the directory. It's still correct to store the value OMV
+	// echoes back (it's simply what was just requested), but see the
+	// "mode" schema attribute's description: changing "mode" on an
+	// existing shared folder has no real effect on disk, a limitation of
+	// the underlying RPC, not of this provider.
+	if updated.Mode != "" {
+		plan.Mode = types.StringValue(updated.Mode)
+	}
 
 	// As in Create: persist state before the apply step so a deploy
 	// failure doesn't lose track of the (already-written) config change.

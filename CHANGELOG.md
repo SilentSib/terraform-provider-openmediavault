@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+- **Fixed (audit pass):** went through every remaining RPC call this
+  client makes line-by-line against the OMV 8.5.5 source, prompted by two
+  prior bugs that both came from trusting assumptions instead of the
+  source. Found and fixed three more real issues:
+  - `Rsync.set()`'s response is a DIFFERENT shape than `Rsync.get()`'s:
+    `set()` doesn't convert the stored comma-separated
+    minute/hour/dayofmonth/month/dayofweek strings into arrays (only
+    `get()` does), and never populates the flat
+    srcsharedfolderref/srcuri/destsharedfolderref/desturi convenience
+    fields (only nested "src"/"dest" objects). Decoding `set()`'s
+    response directly into the same struct used for `get()` -- which
+    `omv_rsync_job`'s Create/Update did -- would have crashed on every
+    real create/update with the same "cannot unmarshal string" class of
+    error already fixed twice elsewhere, and even if it hadn't crashed,
+    would have silently wiped the src/dest fields from state. Fixed by
+    having Create/Update decode only the UUID out of `set()`'s response,
+    then re-fetch the canonical object via `get()` (the same call `Read`
+    already makes) before populating state. Added regression tests
+    reproducing both the realistic response shapes and a negative-control
+    test confirming the old approach really would have failed.
+  - `ShareMgmt.set()` DOES echo `mode` back in its response (verified via
+    the exact source line that appends it before returning) -- a doc
+    comment claiming otherwise was simply wrong, though harmless since
+    the code already didn't rely on it. Now `omv_shared_folder`'s
+    Create/Update read the real value back, and the schema description
+    is more precise about a genuine underlying-API quirk found in the
+    same code path: changing `mode` on an *existing* shared folder is
+    accepted and echoed back by OMV, but does not actually chmod the
+    directory again (chmod only runs the first time the directory is
+    created) -- previously undocumented.
+  - The `name` attribute's regex validator excluded the space character
+    entirely, incorrectly rejecting valid share names with internal
+    spaces (e.g. "My Shared Folder"). The actual MS-FSCC validator in
+    `datamodel/schema.inc` only forbids *leading/trailing* space --
+    its own comment says so explicitly. Root cause: the PHP source uses
+    lookaround (`(?![ ])...(?<! )`), which Go's RE2 engine doesn't
+    support, and the earlier hand-rewrite lost that distinction when
+    working around it. Fixed and added a test matrix covering every
+    forbidden character plus internal-space cases.
+  - Also verified (no changes needed): `Config.isDirty`/`applyChanges`/
+    `revertChanges`'s exact return shapes, `ShareMgmt.delete()`'s and
+    `Rsync.delete()`'s return shapes (both safely discarded already), and
+    every RPC request param's type against its datamodel schema
+    (`rpc.rsync.json`, `rpc.sharemgmt.json`, `rpc.common.json`,
+    `rpc.config.json`).
+
 - **Fixed:** `SystemInformation` modeled `memTotal` as `int64` and
   `cpuUsage` (a field that doesn't actually exist; the real name is
   `cpuUtilization`) as `int`, which crashed decoding

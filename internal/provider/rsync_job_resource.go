@@ -48,9 +48,21 @@ import (
 //     value, matching what the OMV web UI's form does.
 //   - "minute"/"hour"/"dayofmonth"/"month"/"dayofweek" are arrays of cron
 //     field strings at the RPC layer (each either "*" or a bounded number),
-//     but are stored in the config database as a single comma-separated
-//     string -- Rsync.set()/get() convert between the two, so this
-//     provider only ever needs to deal with the array form.
+//     but are stored in the config database -- and sent back by
+//     Rsync.set()'s response -- as a single comma-separated string. Only
+//     Rsync.get() converts the stored string into an array; set()'s
+//     response echoes the raw comma-joined string instead, which decodes
+//     to a Go decode error if you assume it's an array (an earlier version
+//     of this file did exactly that). Create/Update work around this by
+//     only reading the UUID out of set()'s response and re-fetching the
+//     full object via get() -- see the doc comment on rsyncJobRPCObject
+//     and the comments in Create()/Update() below.
+//   - similarly, Rsync.get() (not set()) is the only method that populates
+//     the flat srcsharedfolderref/srcuri/destsharedfolderref/desturi
+//     convenience fields this provider's model relies on; set()'s
+//     response only has the type/mode-appropriate values nested under
+//     "src"/"dest" objects, which this provider doesn't parse. The
+//     get()-refetch above covers this too.
 //   - creating/modifying/deleting a job marks the "rsync" engine module
 //     dirty (engined/module/rsync.inc); unlike shared folders, this
 //     module's deploy() step is NOT a no-op -- it's what actually writes
@@ -71,7 +83,15 @@ var dirtiedByRsyncJobChanges = []string{"rsync"}
 
 // cronFieldValidator builds a list validator matching one of rpc.rsync.
 // json's cron field patterns: either the literal "*" or a bounded number
-// (no leading zeros, mirroring OMV's own regexes).
+// (no leading zeros). Note this is intentionally STRICTER than OMV's own
+// regexes, not an exact copy: e.g. the real minute pattern in
+// rpc.rsync.json is "^[0-9]|[1-5][0-9]$", which -- because "|" binds
+// looser than "^"/"$" -- actually means "starts with one digit" OR "ends
+// with 10-59", unanchored on the other side of each alternative, and so
+// technically accepts some malformed strings a naive reading wouldn't
+// expect. This validator instead fully anchors both alternatives
+// (`^(...)$`), accepting exactly the valid range and nothing OMV's server-
+// side check wouldn't also accept, without inheriting that looseness.
 func cronFieldValidator(pattern, description string) validator.List {
 	return fwlistvalidator.ValueStringsAre(
 		fwstringvalidator.RegexMatches(regexp.MustCompile(pattern), description),
@@ -316,12 +336,19 @@ func (r *RsyncJobResource) Configure(_ context.Context, req resource.ConfigureRe
 	r.revertOnApplyFailure = pd.RevertOnApplyFailure
 }
 
-// rsyncJobRPCObject is the shape of a rsync job object as consumed/
-// returned by Rsync's get/set methods. All fields are always sent on
-// set(), per the doc comment at the top of this file; on get(), only the
-// fields relevant to the stored type/mode combination are populated by
-// OMV, and the rest simply decode to their Go zero value, which is
-// exactly the value this provider would have sent for them anyway.
+// rsyncJobRPCObject is the shape of a rsync job object as CONSUMED by
+// Rsync.set() and RETURNED by Rsync.get() -- it is NOT safe to decode a
+// set() response into this struct. get() explicitly post-processes its
+// result (see engined/rpc/rsync.inc): it explode()s the stored
+// comma-separated minute/hour/dayofmonth/month/dayofweek strings into
+// arrays, and copy()s the type/mode-appropriate src/dest fields into the
+// flat srcsharedfolderref/srcuri/destsharedfolderref/desturi keys this
+// struct expects. set() does neither -- its response has those cron
+// fields as plain (comma-joined) strings, which fails to decode into the
+// []string fields below, and never includes the flat src/dest alias keys
+// at all (only the nested "src"/"dest" objects, which this struct doesn't
+// model). Create/Update therefore only pull the UUID out of set()'s
+// response and immediately re-fetch via get() -- see the comments there.
 type rsyncJobRPCObject struct {
 	UUID      string `json:"uuid"`
 	Enable    bool   `json:"enable"`
@@ -380,13 +407,39 @@ func (r *RsyncJobResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
-	var created rsyncJobRPCObject
+	// Rsync.set()'s response is NOT safe to decode into rsyncJobRPCObject
+	// directly (see the doc comment on that type): unlike get(), it
+	// doesn't convert minute/hour/dayofmonth/month/dayofweek from their
+	// stored comma-separated-string form into arrays, and it never
+	// populates the flat srcsharedfolderref/srcuri/destsharedfolderref/
+	// desturi convenience fields at all (those only exist in get()'s
+	// response). Decoding it as this minimal, uuid-only shape and then
+	// re-fetching via get() -- the same call Read() makes -- sidesteps
+	// both problems and guarantees Create leaves state in exactly the
+	// shape a subsequent Read would produce.
+	var created struct {
+		UUID string `json:"uuid"`
+	}
 	if err := r.client.Call(ctx, "Rsync", "set", obj, &created); err != nil {
 		resp.Diagnostics.AddError("Error Creating Rsync Job", err.Error())
 		return
 	}
 
-	resp.Diagnostics.Append(r.fromRPCObject(ctx, &created, &plan)...)
+	var full rsyncJobRPCObject
+	if err := r.client.Call(ctx, "Rsync", "get", map[string]string{"uuid": created.UUID}, &full); err != nil {
+		resp.Diagnostics.AddError(
+			"Rsync Job Created, but Re-Reading It Failed",
+			fmt.Sprintf(
+				"The job was created (uuid=%s), but the follow-up read used to populate Terraform "+
+					"state failed: %s. The job exists in OMV; re-run `terraform apply` or `terraform "+
+					"import omv_rsync_job.<name> %s` to bring it under management.",
+				created.UUID, err, created.UUID,
+			),
+		)
+		return
+	}
+
+	resp.Diagnostics.Append(r.fromRPCObject(ctx, &full, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -443,13 +496,30 @@ func (r *RsyncJobResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
-	var updated rsyncJobRPCObject
-	if err := r.client.Call(ctx, "Rsync", "set", obj, &updated); err != nil {
+	// See the comment in Create(): set()'s response isn't safe to decode
+	// into rsyncJobRPCObject, and we already know the UUID (it's the
+	// existing one being updated), so there's nothing useful to read from
+	// it here -- discard it and re-fetch via get() instead.
+	if err := r.client.Call(ctx, "Rsync", "set", obj, nil); err != nil {
 		resp.Diagnostics.AddError("Error Updating Rsync Job", err.Error())
 		return
 	}
 
-	resp.Diagnostics.Append(r.fromRPCObject(ctx, &updated, &plan)...)
+	var full rsyncJobRPCObject
+	if err := r.client.Call(ctx, "Rsync", "get", map[string]string{"uuid": plan.ID.ValueString()}, &full); err != nil {
+		resp.Diagnostics.AddError(
+			"Rsync Job Updated, but Re-Reading It Failed",
+			fmt.Sprintf(
+				"The job's configuration was updated, but the follow-up read used to refresh Terraform "+
+					"state failed: %s. The update was applied in OMV; re-run `terraform apply` (or "+
+					"`terraform plan`/`refresh`) to resync state.",
+				err,
+			),
+		)
+		return
+	}
+
+	resp.Diagnostics.Append(r.fromRPCObject(ctx, &full, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
