@@ -141,25 +141,65 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
-// Login authenticates against the "session" RPC service. It must succeed
+// sessionLoginResponse mirrors Session::login()'s actual return shape (see
+// var/www/openmediavault/rpc/session.inc in the OMV source), which is an
+// object describing either a completed login or a pending MFA challenge --
+// NOT a bare boolean. An earlier version of this client assumed a bool
+// response (based on stale documentation, not the source), which fails to
+// decode against a real OMV instance with a JSON error like "cannot
+// unmarshal object into Go value of type bool".
+type sessionLoginResponse struct {
+	Username string `json:"username"`
+	// Status is "authenticated" (login complete, session cookie now
+	// valid) or "challengeRequired" (multi-factor auth configured for
+	// this account; a second Session.verify call with a challenge
+	// response is needed, which this client does not implement).
+	Status    string            `json:"status"`
+	SessionID string            `json:"sessionid,omitempty"`
+	Challenge *sessionChallenge `json:"challenge,omitempty"`
+}
+
+type sessionChallenge struct {
+	Kind        string `json:"kind"`
+	RedirectURL string `json:"redirecturl"`
+}
+
+// Login authenticates against the "Session" RPC service. It must succeed
 // before any other RPC call will be accepted by the server.
 func (c *Client) Login(ctx context.Context) error {
-	var loggedIn bool
+	var resp sessionLoginResponse
 	err := c.rawCall(ctx, "session", "login", map[string]string{
 		"username": c.cfg.Username,
 		"password": c.cfg.Password,
-	}, &loggedIn)
+	}, &resp)
 	if err != nil {
+		// A wrong username/password surfaces as an RPC error here (HTTP
+		// 400 "Incorrect username or password."), not as a "success" field
+		// on the response -- the response struct above only ever
+		// describes an already-successful (or challenge-pending) login.
 		return fmt.Errorf("omvclient: login failed: %w", err)
 	}
-	if !loggedIn {
-		return fmt.Errorf("omvclient: login failed: invalid credentials")
-	}
 
-	c.mu.Lock()
-	c.authenticated = true
-	c.mu.Unlock()
-	return nil
+	switch resp.Status {
+	case "authenticated":
+		c.mu.Lock()
+		c.authenticated = true
+		c.mu.Unlock()
+		return nil
+	case "challengeRequired":
+		kind := "unknown"
+		if resp.Challenge != nil && resp.Challenge.Kind != "" {
+			kind = resp.Challenge.Kind
+		}
+		return fmt.Errorf(
+			"omvclient: login for user %q requires additional multi-factor authentication "+
+				"(challenge kind %q), which this provider does not support. Use a dedicated "+
+				"account with MFA disabled for Terraform automation, or disable MFA on this account",
+			c.cfg.Username, kind,
+		)
+	default:
+		return fmt.Errorf("omvclient: login returned an unrecognized status %q", resp.Status)
+	}
 }
 
 // Logout terminates the current session. Safe to call even if not logged in.

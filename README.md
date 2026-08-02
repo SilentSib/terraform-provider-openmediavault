@@ -20,6 +20,12 @@ below 8.
 - An OpenMediaVault >= 8 instance reachable over HTTP(S), with an account
   that has RPC access (typically the `admin` account or a user in the
   `admin` role)
+- **That account must NOT have multi-factor authentication enabled.**
+  OMV's login flow can require a second `Session.verify` challenge step
+  (TOTP, etc.) that this provider doesn't implement; logging in with an
+  MFA-enabled account fails with a clear "requires additional multi-factor
+  authentication" error rather than hanging or silently failing. Use a
+  separate service account with MFA disabled for Terraform automation.
 
 ## Building
 

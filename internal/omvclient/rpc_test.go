@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -21,7 +22,7 @@ func newTestServer(t *testing.T, handle func(t *testing.T, req rpcRequest, w htt
 		}
 		if req.Service == "session" && req.Method == "login" {
 			http.SetCookie(w, &http.Cookie{Name: "X-OPENMEDIAVAULT-LOGIN", Value: "1"})
-			_, _ = w.Write([]byte(`{"response": true, "error": null}`))
+			_, _ = w.Write([]byte(`{"response": {"username": "admin", "status": "authenticated", "sessionid": "test-session"}, "error": null}`))
 			return
 		}
 		handle(t, req, w)
@@ -161,4 +162,61 @@ func TestApplyChangesAndRevertChanges(t *testing.T) {
 	if lastRevertReq.Service != "Config" || lastRevertReq.Method != "revertChanges" {
 		t.Errorf("revertChanges was not called as expected")
 	}
+}
+
+// TestLoginResponseShapes guards against the exact regression reported in
+// production: Session.login's real response is an object describing
+// status ("authenticated" or "challengeRequired"), never a bare boolean.
+// An earlier version of this client assumed a bool response and failed
+// every real login with "cannot unmarshal object into Go value of type
+// bool".
+func TestLoginResponseShapes(t *testing.T) {
+	t.Run("authenticated succeeds", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/rpc.php", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"response": {"username": "admin", "status": "authenticated", "sessionid": "abc123"}, "error": null}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c := testClient(t, srv)
+		if err := c.Login(context.Background()); err != nil {
+			t.Fatalf("Login failed: %v", err)
+		}
+	})
+
+	t.Run("challengeRequired (MFA) returns a clear, non-panicking error", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/rpc.php", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"response": {"username": "admin", "status": "challengeRequired", "challenge": {"kind": "totp"}}, "error": null}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c := testClient(t, srv)
+		err := c.Login(context.Background())
+		if err == nil {
+			t.Fatal("expected an error for a challengeRequired login")
+		}
+		if !strings.Contains(err.Error(), "multi-factor") || !strings.Contains(err.Error(), "totp") {
+			t.Errorf("expected error to mention MFA and the challenge kind, got: %v", err)
+		}
+	})
+
+	t.Run("legacy bare-boolean response is a decode error, not a silent success", func(t *testing.T) {
+		// This is what the server used to be (incorrectly) mocked as, and
+		// what this client used to (incorrectly) expect. Confirms the
+		// fixed client no longer accepts this shape.
+		mux := http.NewServeMux()
+		mux.HandleFunc("/rpc.php", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"response": true, "error": null}`))
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c := testClient(t, srv)
+		if err := c.Login(context.Background()); err == nil {
+			t.Fatal("expected an error decoding a bare boolean into the login response struct")
+		}
+	})
 }

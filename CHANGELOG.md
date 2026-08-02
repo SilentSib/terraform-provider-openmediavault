@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Fixed:** `Client.Login()` decoded `Session.login`'s response as a bare
+  `bool`, which fails against a real OMV instance with `json: cannot
+  unmarshal object into Go value of type bool` on every login attempt.
+  The actual response (verified against
+  `var/www/openmediavault/rpc/session.inc` in the OMV 8.5.5 source) is an
+  object with a `status` field (`"authenticated"` or, if the account has
+  MFA enabled, `"challengeRequired"` plus challenge details), not a
+  boolean -- this client's earlier assumption came from documentation that
+  turned out to be stale for current OMV versions, not from the source.
+  Fixed `Login()` to parse the real shape and to return a clear error
+  (rather than a confusing decode failure) when an account has MFA
+  enabled, since a second `Session.verify` challenge-response step isn't
+  implemented. Added regression tests (`TestLoginResponseShapes`) pinned
+  to all three cases -- authenticated, challenge-required, and the
+  original bare-boolean shape now correctly rejected -- and fixed the
+  hardcoded `{"response": true}` login mocks in the other test files that
+  had been masking this.
+
 - **Fixed:** the provider's `Metadata().TypeName` was `"openmediavault"`,
   so the resource types it actually served over the wire were
   `openmediavault_shared_folder`/`openmediavault_rsync_job` -- not

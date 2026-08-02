@@ -31,7 +31,7 @@ func testOMVServer(t *testing.T, applyOK, revertOK bool) *httptest.Server {
 		}
 		switch {
 		case req.Service == "session" && req.Method == "login":
-			_, _ = w.Write([]byte(`{"response": true, "error": null}`))
+			_, _ = w.Write([]byte(`{"response": {"username": "admin", "status": "authenticated", "sessionid": "test-session"}, "error": null}`))
 		case req.Service == "Config" && req.Method == "applyChanges":
 			if applyOK {
 				_, _ = w.Write([]byte(`{"response": ["sharedfolders"], "error": null}`))
