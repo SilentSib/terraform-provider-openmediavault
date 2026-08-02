@@ -13,6 +13,9 @@ func TestParseMajorVersion(t *testing.T) {
 		{in: "9.1", want: 9},
 		{in: "7.6.0-3", want: 7},
 		{in: "10.0", want: 10},
+		// Real System.getInformation format: "<dpkg version> (<codename>)".
+		{in: "8.5.5-1 (Shaitung)", want: 8},
+		{in: "9.0.0-1 (SomeFutureCodename)", want: 9},
 		{in: "", wantErr: true},
 		{in: "abc", wantErr: true},
 	}

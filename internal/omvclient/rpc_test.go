@@ -50,7 +50,27 @@ func TestClientLoginAndCall(t *testing.T) {
 		if req.Service != "System" || req.Method != "getInformation" {
 			t.Fatalf("unexpected call: %s.%s", req.Service, req.Method)
 		}
-		_, _ = w.Write([]byte(`{"response": {"version": "8.5.5-1", "hostname": "nas"}, "error": null}`))
+		// A realistic full response: version includes a trailing release
+		// codename, and memTotal is a JSON *string* (per system.inc's own
+		// doc comment: "all numbers that might be > 4GiB are returned as
+		// strings"). SystemInformation intentionally doesn't model
+		// memTotal/cpuUtilization/etc, so this must decode cleanly despite
+		// their presence -- this is the exact shape that used to crash
+		// with "cannot unmarshal string into Go struct field ... memTotal
+		// of type int64" when those fields were modeled with fixed types.
+		_, _ = w.Write([]byte(`{"response": {
+			"ts": 1735689600,
+			"time": "Thu Jan  1 00:00:00 2026",
+			"hostname": "nas",
+			"version": "8.5.5-1 (Shaitung)",
+			"cpuModelName": "Some CPU",
+			"cpuUtilization": 3.2,
+			"memTotal": "17179869184",
+			"memFree": 1234567,
+			"kernel": "Linux 6.1.0",
+			"configDirty": false,
+			"dirtyModules": []
+		}, "error": null}`))
 	})
 	defer srv.Close()
 
@@ -59,7 +79,7 @@ func TestClientLoginAndCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSystemInformation failed: %v", err)
 	}
-	if info.Version != "8.5.5-1" || info.Hostname != "nas" {
+	if info.Version != "8.5.5-1 (Shaitung)" || info.Hostname != "nas" {
 		t.Errorf("unexpected info: %+v", info)
 	}
 }
@@ -74,6 +94,7 @@ func TestCheckMinVersion(t *testing.T) {
 		{"newer major passes", "8.5.5-1", 8, false},
 		{"much newer major passes", "9.0.0-1", 8, false},
 		{"older major fails", "7.9.9-1", 8, true},
+		{"realistic version with codename passes", "8.5.5-1 (Shaitung)", 8, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,6 +113,25 @@ func TestCheckMinVersion(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("missing version field (non-admin account) gives a clear error", func(t *testing.T) {
+		// System.getInformation only includes "version" (and most other
+		// fields) when the caller has the administrator role -- a
+		// non-admin account gets back just ts/time/hostname.
+		srv := newTestServer(t, func(t *testing.T, req rpcRequest, w http.ResponseWriter) {
+			_, _ = w.Write([]byte(`{"response": {"ts": 1735689600, "time": "now", "hostname": "nas"}, "error": null}`))
+		})
+		defer srv.Close()
+
+		c := testClient(t, srv)
+		err := c.CheckMinVersion(context.Background(), 8)
+		if err == nil {
+			t.Fatal("expected an error when the version field is absent")
+		}
+		if !strings.Contains(err.Error(), "administrator role") {
+			t.Errorf("expected error to mention the administrator role requirement, got: %v", err)
+		}
+	})
 }
 
 func TestCallSurfacesRPCError(t *testing.T) {

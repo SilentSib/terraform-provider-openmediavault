@@ -364,15 +364,31 @@ func (c *Client) IsDirty(ctx context.Context, modules []string) (bool, error) {
 }
 
 // SystemInformation is the subset of System.getInformation fields this
-// provider currently cares about. OMV returns additional fields that are
-// intentionally ignored here.
+// provider currently cares about, verified against
+// engined/rpc/system.inc in the OMV 8.5.5 source. OMV returns several
+// other fields (cpuUtilization, memTotal, memFree, loadAverage, ...) that
+// are intentionally NOT modeled here: system.inc's own doc comment warns
+// "all numbers that might be > 4GiB are returned as strings to keep the
+// 32bit compatibility", meaning several numeric-looking fields can come
+// back as either a JSON number or a JSON string depending on the value at
+// runtime -- decoding them into a fixed Go numeric type (as an earlier
+// version of this file did for "memTotal") fails unpredictably depending
+// on how much RAM the target system has. Add fields here only with a type
+// that tolerates both encodings if a future resource needs them.
+//
+// The "version"/"cpuModelName"/"kernel" fields (along with everything
+// else besides ts/time/hostname) are only present in the response at all
+// when the authenticated account has the administrator role -- a
+// non-admin account will get a response with an empty Version, which
+// CheckMinVersion below reports as a distinct error rather than a
+// confusing parse failure.
 type SystemInformation struct {
-	Version  string `json:"version"`
 	Hostname string `json:"hostname"`
-	CPUModel string `json:"cpuModelName"`
-	Kernel   string `json:"kernel"`
-	CPUUsage int    `json:"cpuUsage"`
-	MemTotal int64  `json:"memTotal"`
+	// Version is formatted as "<dpkg version> (<release codename>)", e.g.
+	// "8.5.5-1 (Shaitung)" -- CheckMinVersion only looks at the leading
+	// numeric component before the first ".", so the trailing codename
+	// doesn't need to be stripped here.
+	Version string `json:"version"`
 }
 
 // GetSystemInformation calls System.getInformation.
@@ -386,12 +402,20 @@ func (c *Client) GetSystemInformation(ctx context.Context) (*SystemInformation, 
 
 // CheckMinVersion logs in (if necessary), fetches the system version and
 // returns an error if its major version is below min. OMV version strings
-// look like "8.0.14-1" (Debian package version style); only the leading
-// numeric component before the first "." is treated as the major version.
+// look like "8.0.14-1 (CodeName)" (Debian package version style, plus a
+// release name); only the leading numeric component before the first "."
+// is treated as the major version.
 func (c *Client) CheckMinVersion(ctx context.Context, min int) error {
 	info, err := c.GetSystemInformation(ctx)
 	if err != nil {
 		return fmt.Errorf("omvclient: unable to determine OMV version: %w", err)
+	}
+
+	if info.Version == "" {
+		return fmt.Errorf(
+			"omvclient: System.getInformation did not return a version field; the account used " +
+				"to authenticate must have the administrator role for OMV to include it",
+		)
 	}
 
 	major, err := parseMajorVersion(info.Version)

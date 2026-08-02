@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Fixed:** `SystemInformation` modeled `memTotal` as `int64` and
+  `cpuUsage` (a field that doesn't actually exist; the real name is
+  `cpuUtilization`) as `int`, which crashed decoding
+  `System.getInformation`'s response with `json: cannot unmarshal string
+  into Go struct field SystemInformation.memTotal of type int64`.
+  `engined/rpc/system.inc`'s own doc comment explains why: "all numbers
+  that might be > 4GiB are returned as strings to keep the 32bit
+  compatibility" -- several numeric-looking fields are JSON strings or
+  JSON numbers depending on the runtime value (e.g. how much RAM the
+  target system has), so decoding them into a fixed numeric Go type is
+  inherently fragile. Trimmed `SystemInformation` down to the two fields
+  this provider actually uses (`hostname`, `version`, both always
+  strings) and documented the >4GiB quirk so future fields are added with
+  a tolerant type. Also discovered and handled: `version` is formatted as
+  `"<dpkg version> (<release codename>)"`, e.g. `"8.5.5-1 (Shaitung)"`,
+  not just the bare version (harmless for `CheckMinVersion`'s parsing,
+  which already only looks at digits before the first "."); and most
+  fields including `version` are only present at all when the
+  authenticated account has the administrator role, now reported as a
+  distinct, clearer error instead of an opaque parse failure.
+
 - **Fixed:** `Client.Login()` decoded `Session.login`'s response as a bare
   `bool`, which fails against a real OMV instance with `json: cannot
   unmarshal object into Go value of type bool` on every login attempt.
