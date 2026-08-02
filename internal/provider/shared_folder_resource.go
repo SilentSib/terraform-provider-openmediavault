@@ -63,6 +63,13 @@ var (
 // Sharedfolders::bindListeners() in engined/module/sharedfolders.inc).
 var dirtiedBySharedFolderChanges = []string{"sharedfolders", "systemd"}
 
+// sharedFolderDefaultMode is OMV's own default directory mode (see
+// ShareMgmt.set() in sharemgmt.inc: `$object->add("mode", "string",
+// "775")`), used both as this resource's schema default and as Read's
+// fallback for state that has no mode value at all -- see the comment in
+// Read() for why that fallback is needed.
+const sharedFolderDefaultMode = "775"
+
 // shareNameRegexp mirrors the "sharename" format validator in
 // datamodel/schema.inc: no control characters (0x00-0x1F) or
 // " \ / [ ] : | < > + = ; , * ?, and no leading or trailing space.
@@ -151,12 +158,16 @@ func (r *SharedFolderResource) Schema(_ context.Context, _ resource.SchemaReques
 			"mode": schema.StringAttribute{
 				Optional: true,
 				Computed: true,
-				Default:  stringdefault.StaticString("775"),
+				Default:  stringdefault.StaticString(sharedFolderDefaultMode),
 				Description: "Octal directory permissions for the shared folder, applied only the first time " +
 					"its directory is created -- changing this on an already-existing shared folder is " +
 					"accepted by OMV and will show up in this attribute's state, but does NOT actually " +
 					"chmod the directory again (a limitation of the underlying ShareMgmt RPC, not of this " +
-					"provider). Must be one of \"700\", \"750\", \"755\", \"770\", \"775\" (OMV's default), or \"777\".",
+					"provider). Must be one of \"700\", \"750\", \"755\", \"770\", \"775\" (OMV's default), or " +
+					"\"777\". After `terraform import`, this can't be read back from OMV (the RPC used for " +
+					"reads never returns it) and is set to \"775\" regardless of the real directory's " +
+					"permissions; set it explicitly in configuration after importing if the real value " +
+					"differs, and expect one apply to reconcile it (a no-op against the actual directory).",
 				Validators: []validator.String{
 					fwvalidators.OneOf("700", "750", "755", "770", "775", "777"),
 				},
@@ -278,10 +289,30 @@ func (r *SharedFolderResource) Read(ctx context.Context, req resource.ReadReques
 	state.MountPointID = types.StringValue(found.MountPointID)
 	state.RelativePath = types.StringValue(found.RelativePath)
 	state.Comment = types.StringValue(found.Comment)
-	// state.Mode is intentionally left untouched: ShareMgmt.get() does not
-	// return the directory's current mode, only `set` ever consults it
-	// (and only on first creation), so there is nothing meaningful to
-	// refresh it from.
+	// state.Mode: ShareMgmt.get() never returns it (only set() does, and
+	// even then it just echoes back whatever was last requested, not
+	// necessarily reality once the directory already exists -- see
+	// sharedFolderRPCObject's doc comment), so there is nothing to
+	// meaningfully refresh it from here. Normally that means leaving
+	// whatever value is already in state untouched, which is correct: it
+	// reflects the last value this provider itself wrote via Create or
+	// Update.
+	//
+	// The exception is right after `terraform import`: the synthetic
+	// state ImportState builds has no mode value at all (it's null), and
+	// if Read left it null forever, EVERY subsequent `terraform plan`
+	// would show a spurious "mode will be set" diff -- not because
+	// anything is actually wrong, but because there's nothing in state to
+	// compare the configuration against. Falling back to OMV's own
+	// default here means: import followed by a plan against a shared
+	// folder that really is the default 775 comes back clean; if the
+	// user's configuration specifies something else, the first apply
+	// issues an Update call (a no-op against the actual directory, per
+	// the mode caveat above, but it does get state and config back in
+	// sync) and the diff won't recur on later plans.
+	if state.Mode.IsNull() || state.Mode.IsUnknown() {
+		state.Mode = types.StringValue(sharedFolderDefaultMode)
+	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }

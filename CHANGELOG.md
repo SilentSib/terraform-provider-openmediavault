@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Fixed:** `omv_shared_folder`'s `mode` (and, by the same root cause,
+  `omv_rsync_job`'s `password`) showed a spurious diff on every single
+  `terraform plan` after `terraform import`, even when the configured
+  value already matched reality. Cause: both attributes are
+  Optional+Computed values that this provider deliberately never
+  refreshes from a normal Read -- `ShareMgmt.get()` doesn't return `mode`
+  at all, and `password` is intentionally not read back from
+  `Rsync.get()`'s response so an out-of-band change on the server doesn't
+  fight with a plan that's changing it. That "leave it as whatever's
+  already in state" logic is correct for a normal refresh (state already
+  holds a real value written by a prior Create/Update), but
+  `terraform import` only populates `id`, so state has no value at all to
+  leave alone, and it stayed null forever. Fixed by having `Read()`
+  (`omv_shared_folder`) and `fromRPCObject()` (`omv_rsync_job`, shared by
+  Read/Create/Update) fall back to the schema default specifically when
+  the existing value is null/unknown -- normal refreshes are unaffected,
+  since state already has a real value by then. Added tests exercising
+  the actual `Read()` method end-to-end (not just the internal helpers)
+  against a fake server shaped like the real one, reproducing the exact
+  reported scenario.
+
 - **Fixed (audit pass):** went through every remaining RPC call this
   client makes line-by-line against the OMV 8.5.5 source, prompted by two
   prior bugs that both came from trusting assumptions instead of the

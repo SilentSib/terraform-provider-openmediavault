@@ -304,7 +304,12 @@ func (r *RsyncJobResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Sensitive: true,
 				Description: "SSH/rsync password. Only used when type = \"remote\" and authentication = " +
 					"\"password\". Stored in OMV's configuration database in plain text (matching OMV's " +
-					"own behavior), not just in Terraform state -- prefer authentication = \"pubkey\" where possible.",
+					"own behavior), not just in Terraform state -- prefer authentication = \"pubkey\" where " +
+					"possible. This provider deliberately never reads the stored value back from OMV into " +
+					"state (so an out-of-band password change on the server doesn't fight with a plan " +
+					"that's changing it here); after `terraform import`, it's set to \"\" regardless of the " +
+					"real stored value -- set it explicitly in configuration after importing if the job " +
+					"actually uses password authentication.",
 			},
 			"ssh_certificate_id": schema.StringAttribute{
 				Optional: true, Computed: true, Default: stringdefault.StaticString(""),
@@ -638,11 +643,22 @@ func (r *RsyncJobResource) toRPCObject(ctx context.Context, uuid string, m *rsyn
 }
 
 // fromRPCObject copies an RPC response back into the Terraform model. It
-// intentionally does NOT overwrite m.Password: Rsync.get() does return the
-// stored password in plaintext, but echoing whatever OMV has back into
-// state on every Read would fight with a plan that's deliberately changing
-// it, and there's no server-side reason to trust the roundtrip over what
-// was just sent, so the value the caller last set() is left as-is.
+// intentionally does NOT overwrite m.Password from obj.Password:
+// Rsync.get() does return the stored password in plaintext, but echoing
+// whatever OMV has back into state on every Read would fight with a plan
+// that's deliberately changing it, and there's no server-side reason to
+// trust the roundtrip over what was just sent, so the value the caller
+// last set() is left as-is.
+//
+// The exception is when m.Password is null/unknown, which only happens
+// right after `terraform import` (Create/Update always populate it from
+// the plan before calling this). Left null forever, that would cause the
+// exact same perpetual "will be set" diff as the analogous mode issue in
+// shared_folder_resource.go: state has nothing to compare the
+// configuration against. Falling back to the schema default ("") means an
+// import followed by a plan against a job with no real password comes
+// back clean; if the user's configuration specifies one, the first apply
+// pushes it via Update and the diff won't recur.
 func (r *RsyncJobResource) fromRPCObject(ctx context.Context, obj *rsyncJobRPCObject, m *rsyncJobResourceModel) diag.Diagnostics {
 	var diags diag.Diagnostics
 
@@ -682,7 +698,12 @@ func (r *RsyncJobResource) fromRPCObject(ctx context.Context, obj *rsyncJobRPCOb
 
 	m.ExtraOptions = types.StringValue(obj.ExtraOptions)
 	m.Authentication = types.StringValue(obj.Authentication)
-	// m.Password intentionally left untouched -- see doc comment above.
+	// m.Password intentionally left untouched -- see doc comment above --
+	// except for the null/unknown (post-import) case, which needs some
+	// concrete value to avoid a perpetual plan diff.
+	if m.Password.IsNull() || m.Password.IsUnknown() {
+		m.Password = types.StringValue("")
+	}
 	m.SSHCertificateID = types.StringValue(obj.SSHCertificateRef)
 	m.SSHPort = types.Int64Value(obj.SSHPort)
 

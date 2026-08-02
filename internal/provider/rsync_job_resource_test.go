@@ -118,6 +118,22 @@ func TestRsyncJobToAndFromRPCObject(t *testing.T) {
 	if sentinel.Password.ValueString() != "do-not-touch" {
 		t.Errorf("fromRPCObject must not overwrite Password, got %q", sentinel.Password.ValueString())
 	}
+
+	// Simulate the post-import case: Password starts null (ImportState
+	// only sets id), and fromRPCObject must give it *some* concrete value
+	// rather than leaving it null forever (which would cause a perpetual
+	// plan diff -- see the doc comment on fromRPCObject).
+	postImport := rsyncJobResourceModel{Password: types.StringNull()}
+	diags3 := r.fromRPCObject(ctx, &obj, &postImport)
+	if diags3.HasError() {
+		t.Fatalf("fromRPCObject failed: %v", diags3)
+	}
+	if postImport.Password.IsNull() {
+		t.Error("fromRPCObject must not leave Password null after a fresh import")
+	}
+	if postImport.Password.ValueString() != "" {
+		t.Errorf("expected the post-import Password fallback to be the schema default \"\", got %q", postImport.Password.ValueString())
+	}
 }
 
 func TestStringListSliceHelpers(t *testing.T) {
