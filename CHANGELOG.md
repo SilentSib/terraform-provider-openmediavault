@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Added `omv_ssl_certificate`, managing the SSL tab of OpenMediaVault's
+  System > Certificates page via the `CertificateMgmt` RPC service's
+  `get`/`set`/`delete` methods, verified against the OMV 8.5.5 source. A
+  "bring your own certificate" resource by design -- pairs with the
+  community `hashicorp/tls` provider (or any other PEM source) rather
+  than wrapping `CertificateMgmt.create()`'s server-side self-signed cert
+  generation. `private_key_pem` follows the same pattern established for
+  `omv_rsync_job.password`: `CertificateMgmt.get()` deliberately never
+  returns the stored private key, so it's never refreshed from a normal
+  Read and falls back to `""` specifically when state has no value yet
+  (i.e. right after `terraform import`), avoiding the perpetual-diff bug
+  fixed for the analogous fields earlier. SSH certificates (the other tab
+  on this page, a separate config object and set of RPC methods) are not
+  yet covered by this provider.
+
 - Added `omv_workbench_settings`, managing OMV's System > Workbench >
   Settings page (web UI port, session auto-logout timeout, SSL/TLS) via
   the `WebGui` RPC service's `getSettings`/`setSettings` methods,

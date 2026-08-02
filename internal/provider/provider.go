@@ -244,6 +244,7 @@ func (p *OMVProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewSharedFolderResource,
 		NewRsyncJobResource,
 		NewWorkbenchSettingsResource,
+		NewSSLCertificateResource,
 	}
 }
 

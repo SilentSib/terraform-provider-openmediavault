@@ -124,6 +124,14 @@ resource "omv_workbench_settings" "this" {
   port                = 80
   auto_logout_minutes = 15
 }
+
+# Bring your own certificate (e.g. from the hashicorp/tls provider) --
+# see examples/resources/omv_ssl_certificate for a full example.
+resource "omv_ssl_certificate" "this" {
+  certificate_pem = file("cert.pem")
+  private_key_pem = file("key.pem")
+  comment          = "Managed by Terraform"
+}
 ```
 
 The `required_providers` key (`omv` above) and the `provider` block's label
@@ -212,14 +220,28 @@ This repository is groundwork, not a finished provider:
   staging it, so a failed post-delete `applyChanges` there is reported as
   a non-blocking warning instead, since the object is genuinely already
   gone.
-- **Three resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
-  `omv_workbench_settings`) plus one data source (`omv_shared_folder`).
-  Follow the same pattern to add resources for users, network shares
-  (NFS/SMB), filesystems, RAID, etc. -- and re-verify each one's exact RPC
-  method/field names and dirtied-modules list against that service's
-  `.inc` file the same way, rather than assuming they follow
-  `ShareMgmt`/`Rsync`'s pattern exactly (some services don't use plain
-  `get`/`set`/`delete`, e.g. `Config` itself).
+- **Four resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
+  `omv_workbench_settings`, `omv_ssl_certificate`) plus one data source
+  (`omv_shared_folder`). Follow the same pattern to add resources for
+  users, network shares (NFS/SMB), filesystems, RAID, SSH certificates
+  (the sibling of `omv_ssl_certificate` -- same `CertificateMgmt` RPC
+  service, separate `*Ssh` methods and config object, not yet
+  implemented), etc. -- and re-verify each one's exact RPC method/field
+  names and dirtied-modules list against that service's `.inc` file the
+  same way, rather than assuming they follow `ShareMgmt`/`Rsync`'s
+  pattern exactly (some services don't use plain `get`/`set`/`delete`,
+  e.g. `Config` itself).
+- **`omv_ssl_certificate` deliberately doesn't generate certificates.**
+  OMV's `CertificateMgmt.create()` RPC can generate a self-signed
+  cert+key server-side, but this resource only wraps `get`/`set`/
+  `delete` (bring-your-own PEM content) -- pair it with the community
+  `hashicorp/tls` provider's `tls_private_key`/`tls_self_signed_cert` (or
+  any other source of PEM material, e.g. ACME) instead, matching how
+  most other Terraform providers' certificate resources work. Also note:
+  `CertificateMgmt.get()` deliberately never returns the private key
+  (stripped server-side, "should not leave the system"), so
+  `private_key_pem` follows the same never-refreshed-from-a-normal-Read,
+  defaults-to-empty-after-import pattern as `omv_rsync_job.password`.
 - **`omv_workbench_settings` is a singleton** (OMV's `conf.webadmin`
   config object has `"iterable": false` -- there's exactly one per
   instance, no UUID at all), so it uses a fixed literal Terraform id
