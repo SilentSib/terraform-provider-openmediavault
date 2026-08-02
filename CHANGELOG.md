@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Added `omv_workbench_settings`, managing OMV's System > Workbench >
+  Settings page (web UI port, session auto-logout timeout, SSL/TLS) via
+  the `WebGui` RPC service's `getSettings`/`setSettings` methods,
+  verified against the OMV 8.5.5 source. Unlike every other resource in
+  this provider, the underlying `conf.webadmin` config object is a
+  genuine singleton (`"iterable": false`, no UUID), so this resource uses
+  a fixed literal Terraform id (`"settings"`) and has no real `Delete`
+  (there's no RPC to reset it; removing it from Terraform state just
+  stops managing it). Added a best-effort `ValidateConfig` mirroring the
+  web UI's own port/SSL-certificate cross-field checks (skipped when
+  either side is still unknown, to avoid false positives against
+  not-yet-defaulted values). Documented prominently, in both the
+  resource/attribute descriptions and the README, that this resource
+  controls how every client -- including this provider's own connection
+  -- reaches OMV, so changing port/SSL settings can require updating the
+  provider block itself and can make a successful apply look like a
+  connection failure if the web server restarts mid-response.
+
 - **Fixed:** `omv_shared_folder`'s `mode` (and, by the same root cause,
   `omv_rsync_job`'s `password`) showed a spurious diff on every single
   `terraform plan` after `terraform import`, even when the configured

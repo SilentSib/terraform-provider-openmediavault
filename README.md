@@ -116,6 +116,14 @@ resource "omv_rsync_job" "nightly_backup" {
   hour                  = ["2"]
   minute                = ["0"]
 }
+
+# Singleton -- there is exactly one of these per OMV instance. See its
+# description for the operational warning about changing your own
+# connection settings.
+resource "omv_workbench_settings" "this" {
+  port                = 80
+  auto_logout_minutes = 15
+}
 ```
 
 The `required_providers` key (`omv` above) and the `provider` block's label
@@ -204,14 +212,28 @@ This repository is groundwork, not a finished provider:
   staging it, so a failed post-delete `applyChanges` there is reported as
   a non-blocking warning instead, since the object is genuinely already
   gone.
-- **Two resources exist so far** (`omv_shared_folder`, `omv_rsync_job`)
-  plus one data source (`omv_shared_folder`). Follow the same pattern to
-  add resources for users, network shares (NFS/SMB), filesystems, RAID,
-  etc. -- and re-verify each one's exact RPC method/field names and
-  dirtied-modules list against that service's `.inc` file the same way,
-  rather than assuming they follow `ShareMgmt`/`Rsync`'s pattern exactly
-  (some services don't use plain `get`/`set`/`delete`, e.g. `Config`
-  itself).
+- **Three resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
+  `omv_workbench_settings`) plus one data source (`omv_shared_folder`).
+  Follow the same pattern to add resources for users, network shares
+  (NFS/SMB), filesystems, RAID, etc. -- and re-verify each one's exact RPC
+  method/field names and dirtied-modules list against that service's
+  `.inc` file the same way, rather than assuming they follow
+  `ShareMgmt`/`Rsync`'s pattern exactly (some services don't use plain
+  `get`/`set`/`delete`, e.g. `Config` itself).
+- **`omv_workbench_settings` is a singleton** (OMV's `conf.webadmin`
+  config object has `"iterable": false` -- there's exactly one per
+  instance, no UUID at all), so it uses a fixed literal Terraform id
+  (`"settings"`) and has no real `Delete` (removing it from Terraform
+  state doesn't reset OMV's web UI settings; there's no RPC to do that).
+  More importantly: **this resource controls how every client, including
+  this provider's own connection, reaches OMV.** Changing `port`,
+  `enable_ssl`, `ssl_port`, or `force_ssl_only` can require updating the
+  `omv` provider block's own `port`/`scheme` before the next
+  `plan`/`apply` will connect, and the very `apply` that changes them may
+  report a connection error even though the change succeeded, if nginx
+  restarts before the HTTP response finishes. Test against a disposable
+  instance before using this on anything you can't afford to get locked
+  out of.
 - **`omv_rsync_job`'s RPC calls (service `Rsync`, methods `get`/`set`/
   `delete`) were likewise verified against the OMV 8.5.5 source**
   (`engined/rpc/rsync.inc`, `engined/module/rsync.inc`, and the
