@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -35,13 +36,15 @@ type OMVProvider struct {
 
 // omvProviderModel maps the provider block's configuration to Go types.
 type omvProviderModel struct {
-	Host                 types.String `tfsdk:"host"`
-	Port                 types.Int64  `tfsdk:"port"`
-	Scheme               types.String `tfsdk:"scheme"`
-	Username             types.String `tfsdk:"username"`
-	Password             types.String `tfsdk:"password"`
-	InsecureSkipVerify   types.Bool   `tfsdk:"insecure_skip_verify"`
-	RevertOnApplyFailure types.Bool   `tfsdk:"revert_on_apply_failure"`
+	Host                  types.String `tfsdk:"host"`
+	Port                  types.Int64  `tfsdk:"port"`
+	Scheme                types.String `tfsdk:"scheme"`
+	Username              types.String `tfsdk:"username"`
+	Password              types.String `tfsdk:"password"`
+	InsecureSkipVerify    types.Bool   `tfsdk:"insecure_skip_verify"`
+	RevertOnApplyFailure  types.Bool   `tfsdk:"revert_on_apply_failure"`
+	RequestTimeoutSeconds types.Int64  `tfsdk:"request_timeout_seconds"`
+	DeployTimeoutSeconds  types.Int64  `tfsdk:"deploy_timeout_seconds"`
 }
 
 // providerData is what's stashed in resp.ResourceData / resp.DataSourceData
@@ -132,6 +135,27 @@ func (p *OMVProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *
 					"it was in fact written to OMV, so a later `terraform apply` or `terraform destroy` can " +
 					"reconcile it.",
 			},
+			"request_timeout_seconds": schema.Int64Attribute{
+				Optional: true,
+				Description: "Timeout, in seconds, for ordinary RPC calls (login, and most resources' " +
+					"get/set/delete). Defaults to 60. These are typically fast regardless of hardware; " +
+					"raise this only if you're seeing timeouts on basic operations, not deploy failures " +
+					"(see deploy_timeout_seconds for those).",
+			},
+			"deploy_timeout_seconds": schema.Int64Attribute{
+				Optional: true,
+				Description: "Timeout, in seconds, specifically for Config.applyChanges/revertChanges -- " +
+					"the calls every mutating resource makes after writing a change, which OMV executes " +
+					"as a real, potentially slow Salt deployment (rendering templates, writing files, " +
+					"possibly restarting services) in its separate omv-engined daemon, not as a quick " +
+					"database write. Defaults to 300 (5 minutes). Raise this if you're on constrained " +
+					"hardware (e.g. a Raspberry Pi) and see \"Configuration Written, but Deploying It " +
+					"Failed\" errors whose underlying cause is a client-side \"context deadline exceeded\" " +
+					"rather than an actual error from OMV -- that specific combination means the deploy " +
+					"was very likely still running (and probably completed successfully) when this " +
+					"provider gave up waiting for the response; it does not by itself mean the change " +
+					"failed to apply. Check the OMV web UI's pending changes indicator to confirm.",
+			},
 		},
 	}
 }
@@ -201,6 +225,15 @@ func (p *OMVProvider) Configure(ctx context.Context, req provider.ConfigureReque
 		insecureSkipVerify = b
 	}
 
+	var requestTimeout time.Duration
+	if !data.RequestTimeoutSeconds.IsNull() {
+		requestTimeout = time.Duration(data.RequestTimeoutSeconds.ValueInt64()) * time.Second
+	}
+	var deployTimeout time.Duration
+	if !data.DeployTimeoutSeconds.IsNull() {
+		deployTimeout = time.Duration(data.DeployTimeoutSeconds.ValueInt64()) * time.Second
+	}
+
 	client, err := omvclient.New(omvclient.Config{
 		Host:               host,
 		Port:               port,
@@ -208,6 +241,8 @@ func (p *OMVProvider) Configure(ctx context.Context, req provider.ConfigureReque
 		Username:           username,
 		Password:           password,
 		InsecureSkipVerify: insecureSkipVerify,
+		Timeout:            requestTimeout,
+		DeployTimeout:      deployTimeout,
 	})
 	if err != nil {
 		resp.Diagnostics.AddError("Unable to Create OMV Client", err.Error())
@@ -245,6 +280,7 @@ func (p *OMVProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewRsyncJobResource,
 		NewWorkbenchSettingsResource,
 		NewSSLCertificateResource,
+		NewSSHCertificateResource,
 	}
 }
 

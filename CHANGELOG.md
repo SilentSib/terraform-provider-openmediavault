@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+- **Fixed:** a change applied cleanly (config written) but its follow-up
+  `Config.applyChanges` deploy step reported failure with an underlying
+  "context deadline exceeded" error, on hardware where a Salt deployment
+  took longer than the client's flat 30-second timeout. Root cause,
+  verified against source: `Config.applyChanges` isn't executed inline by
+  the PHP-FPM worker handling the HTTP request -- `rpc.php` proxies it to
+  the separate, already-running `omv-engined` daemon
+  (`usr/share/php/openmediavault/rpc/proxy/json.inc`), which keeps running
+  the deploy to completion regardless of whether this provider's HTTP
+  client is still waiting. A single client-wide 30s timeout was much too
+  short for that call (which runs a real Salt state -- rendering
+  templates, writing files, restarting services -- not a quick database
+  write) especially on constrained hardware, while being more timeout than
+  needed for ordinary get/set/delete calls.
+  - Split the client's single timeout into two: `Timeout` (default raised
+    from 30s to 60s, for ordinary calls) and a new `DeployTimeout`
+    (default 5 minutes, used only by `Config.applyChanges`/
+    `revertChanges`). Both are now exposed as provider-level
+    `request_timeout_seconds`/`deploy_timeout_seconds` options. Removed
+    the blanket `http.Client.Timeout` in favor of per-call context
+    deadlines, so the two are genuinely independent.
+  - Added detection for this specific ambiguous case: when
+    `Config.applyChanges` fails with what looks like a client-side
+    timeout (`context.DeadlineExceeded` or a lower-level network
+    timeout) rather than an actual RPC error from OMV, the diagnostic now
+    says so explicitly ("Deploy Likely Still Succeeded") instead of
+    reporting it as an unambiguous failure, and points at checking OMV's
+    pending-changes indicator before assuming anything went wrong.
+  - While making this fix, deduplicated the five near-identical
+    per-resource `applyOrHandleApplyFailure` methods (shared_folder,
+    rsync_job, workbench_settings, ssl_certificate, ssh_certificate) into
+    a single shared implementation (`apply_helper.go`), so this kind of
+    fix (and any future one) only needs to be made once.
+
+- Added `omv_ssh_certificate`, the sibling of `omv_ssl_certificate` for
+  the SSH tab of System > Certificates, via `CertificateMgmt`'s
+  `getSsh`/`setSsh`/`deleteSsh` methods, verified against the OMV 8.5.5
+  source. Same "bring your own key" design and `private_key_pem`
+  never-refreshed/import-fallback treatment as `omv_ssl_certificate`.
+  Found and mirrored (verified against source and unit-tested with
+  positive and negative cases) two format constraints narrower than
+  "any valid SSH key": `public_key_openssh` only accepts `ssh-rsa`,
+  `ssh-ed25519`, or `sk-ssh-ed25519@openssh.com` (not ECDSA or DSA), and
+  `private_key_pem` only accepts `OPENSSH PRIVATE KEY` or
+  `RSA PRIVATE KEY` PEM headers (not the generic PKCS8 `PRIVATE KEY`
+  header or `EC PRIVATE KEY`) -- both validated client-side, the latter
+  via a resource-level `ValidateConfig` so the meaningful empty-string
+  ("keep the existing stored key") value isn't rejected.
+
 - Added `omv_ssl_certificate`, managing the SSL tab of OpenMediaVault's
   System > Certificates page via the `CertificateMgmt` RPC service's
   `get`/`set`/`delete` methods, verified against the OMV 8.5.5 source. A

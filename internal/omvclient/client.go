@@ -49,8 +49,25 @@ type Config struct {
 	// the self-signed certificates OMV ships with by default, but should be
 	// avoided in production where possible.
 	InsecureSkipVerify bool
-	// Timeout bounds every individual HTTP request made by the client.
+	// Timeout bounds ordinary RPC calls (login, get/set/delete, etc.),
+	// which are typically fast regardless of hardware.
 	Timeout time.Duration
+	// DeployTimeout bounds Config.applyChanges/revertChanges specifically.
+	// These are NOT ordinary RPC calls: rpc.php proxies them synchronously
+	// to the long-running omv-engined daemon (see
+	// usr/share/php/openmediavault/rpc/proxy/json.inc's \OMV\Rpc\Rpc::call
+	// with MODE_REMOTE), which then runs `omv-salt deploy run <module>` --
+	// a real Salt state run (rendering templates, writing files, possibly
+	// restarting services) that can legitimately take much longer than a
+	// simple database read/write, especially on constrained hardware like
+	// a Raspberry Pi. Using Timeout's short default here would abort the
+	// HTTP wait before a slow-but-successful deploy finishes; the daemon
+	// keeps running regardless of whether this client is still listening,
+	// so a timeout here does not mean the deploy failed server-side, only
+	// that this client stopped waiting to find out. See
+	// omv_shared_folder's and other resources' applyOrHandleApplyFailure
+	// for how that ambiguity is surfaced to the user.
+	DeployTimeout time.Duration
 }
 
 // Client is a small, session-authenticated JSON-RPC client for OMV.
@@ -113,7 +130,10 @@ func New(cfg Config) (*Client, error) {
 		}
 	}
 	if cfg.Timeout == 0 {
-		cfg.Timeout = 30 * time.Second
+		cfg.Timeout = 60 * time.Second
+	}
+	if cfg.DeployTimeout == 0 {
+		cfg.DeployTimeout = 5 * time.Minute
 	}
 
 	jar, err := cookiejar.New(nil)
@@ -126,10 +146,15 @@ func New(cfg Config) (*Client, error) {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify} // #nosec G402 -- opt-in via provider config
 	}
 
+	// No http.Client-level Timeout here deliberately: that would apply a
+	// single fixed ceiling to every request regardless of what kind of
+	// call it is, which is exactly the bug this Config.Timeout/
+	// DeployTimeout split exists to avoid. Each call site instead wraps
+	// its own context with whichever of the two timeouts applies --
+	// see callWithTimeout below.
 	httpClient := &http.Client{
 		Jar:       jar,
 		Transport: transport,
-		Timeout:   cfg.Timeout,
 	}
 
 	baseURL := fmt.Sprintf("%s://%s:%d/rpc.php", cfg.Scheme, cfg.Host, cfg.Port)
@@ -168,6 +193,8 @@ type sessionChallenge struct {
 // before any other RPC call will be accepted by the server.
 func (c *Client) Login(ctx context.Context) error {
 	var resp sessionLoginResponse
+	ctx, cancel := c.withTimeout(ctx, c.cfg.Timeout)
+	defer cancel()
 	err := c.rawCall(ctx, "session", "login", map[string]string{
 		"username": c.cfg.Username,
 		"password": c.cfg.Password,
@@ -210,7 +237,11 @@ func (c *Client) Logout(ctx context.Context) error {
 	if !authenticated {
 		return nil
 	}
-	if err := c.rawCall(ctx, "session", "logout", nil, nil); err != nil {
+	if err := func() error {
+		ctx, cancel := c.withTimeout(ctx, c.cfg.Timeout)
+		defer cancel()
+		return c.rawCall(ctx, "session", "logout", nil, nil)
+	}(); err != nil {
 		return fmt.Errorf("omvclient: logout failed: %w", err)
 	}
 	c.mu.Lock()
@@ -222,8 +253,18 @@ func (c *Client) Logout(ctx context.Context) error {
 // Call invokes service.method with params and decodes the "response" field
 // of the result into out (which should be a pointer, or nil to discard the
 // response body). It transparently logs in first if the client does not yet
-// hold a session.
+// hold a session. Bounded by Config.Timeout -- for Config.applyChanges/
+// revertChanges specifically, use ApplyChanges/RevertChanges instead,
+// which use the more generous Config.DeployTimeout; see its doc comment
+// for why.
 func (c *Client) Call(ctx context.Context, service, method string, params interface{}, out interface{}) error {
+	return c.callWithTimeout(ctx, c.cfg.Timeout, service, method, params, out)
+}
+
+// callWithTimeout is Call's implementation, parameterized by which of
+// Config.Timeout/DeployTimeout (or a caller-specific value) applies to
+// this particular request.
+func (c *Client) callWithTimeout(ctx context.Context, timeout time.Duration, service, method string, params interface{}, out interface{}) error {
 	c.mu.Lock()
 	authenticated := c.authenticated
 	c.mu.Unlock()
@@ -233,7 +274,19 @@ func (c *Client) Call(ctx context.Context, service, method string, params interf
 			return err
 		}
 	}
+
+	ctx, cancel := c.withTimeout(ctx, timeout)
+	defer cancel()
 	return c.rawCall(ctx, service, method, params, out)
+}
+
+// withTimeout wraps ctx with a timeout, if one is set (timeout <= 0 means
+// "no additional deadline beyond whatever ctx already carries").
+func (c *Client) withTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 // rawCall performs a single HTTP round trip without any auth bookkeeping.
@@ -322,7 +375,7 @@ func (c *Client) ApplyChanges(ctx context.Context, modules []string, force bool)
 		modules = []string{}
 	}
 	var applied []string
-	err := c.Call(ctx, "Config", "applyChanges", map[string]interface{}{
+	err := c.callWithTimeout(ctx, c.cfg.DeployTimeout, "Config", "applyChanges", map[string]interface{}{
 		"modules": modules,
 		"force":   force,
 	}, &applied)
@@ -341,7 +394,7 @@ func (c *Client) ApplyChanges(ctx context.Context, modules []string, force bool)
 // OMVProvider's revert_on_apply_failure option for where this is wired
 // into the provider, off by default.
 func (c *Client) RevertChanges(ctx context.Context, filename string) error {
-	return c.Call(ctx, "Config", "revertChanges", map[string]string{
+	return c.callWithTimeout(ctx, c.cfg.DeployTimeout, "Config", "revertChanges", map[string]string{
 		"filename": filename,
 	}, nil)
 }

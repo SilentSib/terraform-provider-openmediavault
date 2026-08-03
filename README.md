@@ -132,6 +132,13 @@ resource "omv_ssl_certificate" "this" {
   private_key_pem = file("key.pem")
   comment          = "Managed by Terraform"
 }
+
+# See examples/resources/omv_ssh_certificate for the format constraints
+# (OMV rejects ECDSA public keys and PKCS8/EC private keys).
+resource "omv_ssh_certificate" "this" {
+  public_key_openssh = file("id_ed25519.pub")
+  private_key_pem     = file("id_ed25519") # must be OpenSSH- or RSA-formatted PEM
+}
 ```
 
 The `required_providers` key (`omv` above) and the `provider` block's label
@@ -162,6 +169,8 @@ even though nothing in your configuration mentions `hashicorp/omv` by name.
 | `password`               | `OMV_PASSWORD`               | —         | Password for that account. Required, sensitive.         |
 | `insecure_skip_verify`   | `OMV_INSECURE_SKIP_VERIFY`  | `false`   | Skip TLS verification (OMV's default cert is self-signed). |
 | `revert_on_apply_failure`| —                            | `false`   | Auto-call `Config.revertChanges` (mirrors the web UI's "Undo") when a deploy fails. Instance-wide blast radius -- see [Status & caveats](#status--caveats). |
+| `request_timeout_seconds`| —                            | `60`      | Timeout for ordinary RPC calls (login, most get/set/delete). |
+| `deploy_timeout_seconds` | —                            | `300`     | Timeout specifically for `Config.applyChanges`/`revertChanges`, which run a real (potentially slow) Salt deployment, not a quick database write -- see [Status & caveats](#status--caveats). Raise this on constrained hardware. |
 
 See `examples/provider/provider.tf` for a fuller example, and
 `examples/resources/` / `examples/data-sources/` for per-resource examples.
@@ -180,6 +189,24 @@ reuses the resulting cookie for every subsequent call
 
 This repository is groundwork, not a finished provider:
 
+- **A "deploy failed" error may not mean what it says -- read this before
+  assuming a failed apply didn't take effect.** `Config.applyChanges` is
+  proxied by `rpc.php` straight to the long-running `omv-engined` daemon
+  (verified via `usr/share/php/openmediavault/rpc/proxy/json.inc`), which
+  then runs a real Salt deployment (`omv-salt deploy run <module>`) --
+  this can legitimately take longer than a simple database read/write,
+  especially on constrained hardware like a Raspberry Pi, and the daemon
+  keeps running it to completion regardless of whether this provider's
+  HTTP client is still waiting for the response. A client-side timeout
+  here is therefore ambiguous -- the deploy may well have completed
+  successfully after this provider gave up waiting -- and this provider
+  now detects that specific case and reports it distinctly ("Configuration
+  Written, but Confirming the Deploy Timed Out (Deploy Likely Still
+  Succeeded)") rather than as an unambiguous failure. If you see that
+  error, check the OMV web UI's pending changes indicator before assuming
+  anything is wrong; a plain `terraform apply` retry should then complete
+  quickly. The provider's `deploy_timeout_seconds` (default 300) controls
+  how long it waits before giving up.
 - **`omv_shared_folder`'s RPC calls (service `ShareMgmt`, methods `get`/
   `set`/`delete`) were verified against the real OMV 8.5.5 source**
   (`usr/share/openmediavault/engined/rpc/sharemgmt.inc` and the
@@ -220,17 +247,31 @@ This repository is groundwork, not a finished provider:
   staging it, so a failed post-delete `applyChanges` there is reported as
   a non-blocking warning instead, since the object is genuinely already
   gone.
-- **Four resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
-  `omv_workbench_settings`, `omv_ssl_certificate`) plus one data source
-  (`omv_shared_folder`). Follow the same pattern to add resources for
-  users, network shares (NFS/SMB), filesystems, RAID, SSH certificates
-  (the sibling of `omv_ssl_certificate` -- same `CertificateMgmt` RPC
-  service, separate `*Ssh` methods and config object, not yet
-  implemented), etc. -- and re-verify each one's exact RPC method/field
-  names and dirtied-modules list against that service's `.inc` file the
-  same way, rather than assuming they follow `ShareMgmt`/`Rsync`'s
-  pattern exactly (some services don't use plain `get`/`set`/`delete`,
-  e.g. `Config` itself).
+- **Five resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
+  `omv_workbench_settings`, `omv_ssl_certificate`, `omv_ssh_certificate`)
+  plus one data source (`omv_shared_folder`). Follow the same pattern to
+  add resources for users, network shares (NFS/SMB), filesystems, RAID,
+  etc. -- and re-verify each one's exact RPC method/field names and
+  dirtied-modules list against that service's `.inc` file the same way,
+  rather than assuming they follow `ShareMgmt`/`Rsync`'s pattern exactly
+  (some services don't use plain `get`/`set`/`delete`, e.g. `Config`
+  itself).
+- **`omv_ssh_certificate` accepts a narrower set of key formats than
+  "any valid SSH key."** Verified against OMV's own format validators
+  (`\OMV\Ssh\PublicKey::isOpenSSH()` and the `sshprivkey-pem` schema
+  format in `datamodel/schema.inc`): `public_key_openssh` only accepts
+  `ssh-rsa`, `ssh-ed25519`, or `sk-ssh-ed25519@openssh.com` -- ECDSA
+  (`ecdsa-sha2-*`) and DSA (`ssh-dss`) keys are rejected. `private_key_pem`
+  only accepts PEM headed `-----BEGIN OPENSSH PRIVATE KEY-----` or
+  `-----BEGIN RSA PRIVATE KEY-----` -- notably NOT the generic PKCS8
+  `-----BEGIN PRIVATE KEY-----` that `hashicorp/tls`'s `tls_private_key.
+  private_key_pem` produces for ed25519/ECDSA keys, and not
+  `-----BEGIN EC PRIVATE KEY-----` either. Use `private_key_openssh`
+  from `tls_private_key` for non-RSA algorithms -- see
+  `examples/resources/omv_ssh_certificate`. Both formats are validated
+  client-side (mirroring OMV's exact regexes, tested against the same
+  cases) so a mismatch is caught at `plan` time rather than as an opaque
+  RPC error.
 - **`omv_ssl_certificate` deliberately doesn't generate certificates.**
   OMV's `CertificateMgmt.create()` RPC can generate a self-signed
   cert+key server-side, but this resource only wraps `get`/`set`/

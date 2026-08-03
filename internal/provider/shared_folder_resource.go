@@ -409,63 +409,10 @@ func (r *SharedFolderResource) ImportState(ctx context.Context, req resource.Imp
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
-// applyOrHandleApplyFailure calls Config.applyChanges scoped to the modules
-// a shared folder change dirties. On failure it either:
-//   - (default) adds a blocking error diagnostic and leaves the change
-//     queued in OMV, matching what the OMV web UI itself does when its
-//     "Apply" button's RPC call fails -- it does NOT auto-revert, only its
-//     separate, explicit "Undo" button does (see apply-config-panel.
-//     component.ts). The object this resource manages was already written
-//     to OMV's config database (the caller must resp.State.Set before
-//     calling this), so it stays present -- just "dirty" -- in both OMV and
-//     Terraform state, consistent with the web UI leaving it in the pending
-//     changes list for the operator to retry or undo by hand.
-//   - (opt-in via the provider's revert_on_apply_failure) also calls
-//     Config.revertChanges, mirroring a manual click of "Undo". Since that
-//     RPC discards the ENTIRE pending-changes queue instance-wide, not just
-//     this resource's change, the error message says so explicitly.
+// applyOrHandleApplyFailure delegates to the shared implementation in
+// apply_helper.go (see its doc comment for the full rationale, including
+// the client-side-timeout-vs-real-failure distinction), scoped to the
+// modules a SharedFolderResource change dirties.
 func (r *SharedFolderResource) applyOrHandleApplyFailure(ctx context.Context, diags *diag.Diagnostics) {
-	if _, err := r.client.ApplyChanges(ctx, dirtiedBySharedFolderChanges, false); err != nil {
-		if r.revertOnApplyFailure {
-			if revertErr := r.client.RevertChanges(ctx, ""); revertErr != nil {
-				diags.AddError(
-					"Failed to Apply Changes, and the Automatic Revert Also Failed",
-					fmt.Sprintf(
-						"Applying the configuration change failed: %s. The provider then tried to revert ALL "+
-							"pending configuration changes (revert_on_apply_failure = true), but that also "+
-							"failed: %s. OMV's configuration database and the actual system state may now be "+
-							"inconsistent -- check the OMV web UI's pending changes panel.",
-						err, revertErr,
-					),
-				)
-				return
-			}
-			diags.AddError(
-				"Failed to Apply Changes; Reverted All Pending Changes",
-				fmt.Sprintf(
-					"Applying the configuration change failed: %s. Because revert_on_apply_failure = true, "+
-						"the provider reverted ALL pending configuration changes on this OMV instance "+
-						"(equivalent to clicking \"Undo\" in the web UI) -- including any unrelated changes "+
-						"staged by other admins or tools, not just this resource's. This resource remains "+
-						"recorded in Terraform state pointing at an object that may no longer reflect what "+
-						"was just planned; run `terraform plan` again to reconcile.",
-					err,
-				),
-			)
-			return
-		}
-		diags.AddError(
-			"Configuration Written, but Deploying It Failed",
-			fmt.Sprintf(
-				"The change was written to OMV's configuration database, but deploying it "+
-					"(Config.applyChanges) failed: %s. As in the OMV web UI, the change has NOT been "+
-					"automatically undone -- it remains queued as a pending change. Fix the underlying issue "+
-					"and run `terraform apply` again, or resolve it manually (Apply/Undo) in the OMV web UI. "+
-					"Set the provider's revert_on_apply_failure = true to have Terraform automatically call "+
-					"Config.revertChanges instead, noting that discards ALL pending changes instance-wide, "+
-					"not just this resource's.",
-				err,
-			),
-		)
-	}
+	applyOrHandleApplyFailure(ctx, r.client, r.revertOnApplyFailure, dirtiedBySharedFolderChanges, diags)
 }
