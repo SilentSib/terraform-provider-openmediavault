@@ -139,6 +139,13 @@ resource "omv_ssh_certificate" "this" {
   public_key_openssh = file("id_ed25519.pub")
   private_key_pem     = file("id_ed25519") # must be OpenSSH- or RSA-formatted PEM
 }
+
+resource "omv_smb_share" "media" {
+  enabled          = true
+  shared_folder_id = omv_shared_folder.media.id
+  comment          = "Media library"
+  recycle_bin      = true
+}
 ```
 
 The `required_providers` key (`omv` above) and the `provider` block's label
@@ -247,15 +254,32 @@ This repository is groundwork, not a finished provider:
   staging it, so a failed post-delete `applyChanges` there is reported as
   a non-blocking warning instead, since the object is genuinely already
   gone.
-- **Five resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
-  `omv_workbench_settings`, `omv_ssl_certificate`, `omv_ssh_certificate`)
-  plus one data source (`omv_shared_folder`). Follow the same pattern to
-  add resources for users, network shares (NFS/SMB), filesystems, RAID,
+- **Six resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
+  `omv_workbench_settings`, `omv_ssl_certificate`, `omv_ssh_certificate`,
+  `omv_smb_share`) plus one data source (`omv_shared_folder`). Follow the
+  same pattern to add resources for users, NFS shares, filesystems, RAID,
   etc. -- and re-verify each one's exact RPC method/field names and
   dirtied-modules list against that service's `.inc` file the same way,
   rather than assuming they follow `ShareMgmt`/`Rsync`'s pattern exactly
   (some services don't use plain `get`/`set`/`delete`, e.g. `Config`
   itself).
+- **`omv_smb_share`'s RPC calls (service `Smb`, methods `getShare`/
+  `setShare`/`deleteShare`) were verified against the OMV 8.5.5 source**,
+  and unlike `Rsync`, `getShare()`/`setShare()` have no shape divergence
+  -- both simply return `$object->getAssoc()`. Two things worth knowing:
+  (1) at most one share may reference a given `shared_folder_id` -- OMV
+  enforces this server-side (`assertIsUnique`) and rejects a second one
+  with a clear error; (2) four fields
+  (`time_machine_max_size`/`transport_encryption`/`follow_symlinks`/
+  `wide_links`) are absent from the RPC's own params schema but are still
+  fully settable -- confirmed by reading OMV's JSON schema validator
+  directly (it only checks properties it declares, never rejects extras)
+  and that the underlying config object is validated against the fuller
+  config datamodel, not the narrower RPC schema. Also note
+  `recycle_bin_max_size_bytes`/`recycle_bin_retention_days` are named for
+  their actual units (bytes / days) rather than the RPC's unit-less
+  `recyclemaxsize`/`recyclemaxage`, confirmed from the web UI's form
+  definition since the datamodel itself doesn't say.
 - **`omv_ssh_certificate` accepts a narrower set of key formats than
   "any valid SSH key."** Verified against OMV's own format validators
   (`\OMV\Ssh\PublicKey::isOpenSSH()` and the `sshprivkey-pem` schema

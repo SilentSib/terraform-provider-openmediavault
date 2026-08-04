@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+- Added `omv_smb_share`, managing OpenMediaVault's SMB/CIFS shares
+  (`Smb` RPC service's `getShare`/`setShare`/`deleteShare`), verified
+  against the OMV 8.5.5 source. Unlike `Rsync`, `getShare()`/`setShare()`
+  have no response-shape divergence, so no get()-refetch workaround was
+  needed here. Verified two non-obvious things directly against source
+  rather than assuming: (1) `recyclemaxsize`/`recyclemaxage` are raw
+  bytes/days respectively (confirmed from the web UI's form definition,
+  since the datamodel itself has no unit information) -- exposed as
+  `recycle_bin_max_size_bytes`/`recycle_bin_retention_days` to make the
+  units unambiguous; (2) four fields
+  (`timemachinemaxsize`/`transportencryption`/`followsymlinks`/
+  `widelinks`) are present in the config datamodel but absent from the
+  RPC's own params schema -- read OMV's JSON schema validator
+  (`checkProperties()`) directly to confirm it only validates declared
+  properties and never rejects extras, and that `setShare()`'s
+  `ConfigObject` is validated against the fuller config datamodel rather
+  than the narrower RPC schema, so these are still safely and fully
+  settable despite the gap. Also surfaces OMV's `assertIsUnique`
+  constraint (at most one share per shared folder) as a documented,
+  expected error rather than a surprise.
+
+- Added `omv_smb_share`, managing SMB/CIFS shares (Services > SMB/CIFS >
+  Shares) via the `Smb` RPC service's `getShare`/`setShare`/`deleteShare`
+  methods, verified against the OMV 8.5.5 source. Unlike `Rsync`,
+  `getShare()`/`setShare()` have no shape divergence -- both simply
+  return `$object->getAssoc()`. Confirmed two non-obvious things by
+  reading source rather than assuming: (1) four fields
+  (`timemachinemaxsize`/`transportencryption`/`followsymlinks`/
+  `widelinks`) are absent from `rpc.smb.setshare`'s own params schema but
+  are still fully settable, since OMV's JSON schema validator
+  (`checkProperties()`) only checks properties it declares and never
+  rejects extras, and the underlying config object is validated against
+  the fuller `conf.service.smb.share` datamodel, not the narrower RPC
+  schema -- all four are modeled as ordinary settable attributes; (2)
+  `recyclemaxsize`/`recyclemaxage` are unit-less in their own field names
+  but are actually raw bytes and days respectively, confirmed from the
+  web UI's form component since the datamodel itself doesn't say --
+  named `recycle_bin_max_size_bytes`/`recycle_bin_retention_days` here to
+  make that unambiguous. Also confirmed and documented: OMV enforces at
+  most one SMB share per shared folder (`assertIsUnique`), surfaced as a
+  clear RPC error if violated.
+
 - **Fixed:** `omv_ssh_certificate.public_key_openssh`'s client-side format
   validator rejected otherwise-valid keys ending in a trailing newline --
   exactly what Terraform's `file()` function produces reading an ordinary
