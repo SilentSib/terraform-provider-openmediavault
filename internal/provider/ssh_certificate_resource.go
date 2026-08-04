@@ -81,8 +81,23 @@ var dirtiedBySSHCertificateChanges = []string{"certificates"}
 // (usr/share/php/openmediavault/ssh/publickey.inc): only "ssh-rsa",
 // "ssh-ed25519", or "sk-ssh-ed25519@openssh.com" are accepted -- notably
 // NOT ecdsa-sha2-* or ssh-dss.
+//
+// The trailing `\r?\n?` is NOT in OMV's own pattern -- it compensates for
+// a real difference between PHP/PCRE and Go/RE2, found via a reported
+// false-rejection of a valid key ending in a comment (e.g. "id_rsa_omv")
+// with a trailing newline, which is exactly what Terraform's file()
+// function produces reading an ordinary .pub file (nearly all end in
+// "\n"). PCRE's `$` (used by OMV's actual regex, unlike Go's RE2 default)
+// matches at the end of the subject OR immediately before a single
+// trailing newline -- Go's default `$` only matches at the absolute end
+// of text, with no such allowance. Verified empirically (not just from
+// memory of the spec) by running OMV's literal PHP regex via `php -r`
+// against a matrix of trailing-newline/CRLF/whitespace cases, then
+// confirming this Go pattern produces identical results for every case,
+// including the boundary one PCRE itself rejects: exactly one trailing
+// "\n" is accepted, two are not.
 var sshPublicKeyRegexp = regexp.MustCompile(
-	`^(sk-ssh-ed25519@openssh\.com|ssh-(rsa|ed25519)) AAAA[0-9A-Za-z+/]+={0,3}\s*(.+)*$`,
+	`^(sk-ssh-ed25519@openssh\.com|ssh-(rsa|ed25519)) AAAA[0-9A-Za-z+/]+={0,3}\s*(.+)*\r?\n?$`,
 )
 
 // sshPrivateKeyRegexp mirrors the "sshprivkey-pem" format validator in
@@ -133,7 +148,8 @@ func (r *SSHCertificateResource) Schema(_ context.Context, _ resource.SchemaRequ
 				Required: true,
 				Description: "OpenSSH-format public key (\"ssh-<type> <base64> [comment]\"). Only " +
 					"ssh-rsa, ssh-ed25519, and sk-ssh-ed25519@openssh.com are accepted by OMV -- " +
-					"ECDSA (ecdsa-sha2-*) and DSA (ssh-dss) keys are rejected.",
+					"ECDSA (ecdsa-sha2-*) and DSA (ssh-dss) keys are rejected. A single trailing " +
+					"newline (as produced by file() reading an ordinary .pub file) is fine.",
 				Validators: []validator.String{
 					fwstringvalidator.RegexMatches(
 						sshPublicKeyRegexp,

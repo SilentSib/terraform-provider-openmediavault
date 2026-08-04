@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Fixed:** `omv_ssh_certificate.public_key_openssh`'s client-side format
+  validator rejected otherwise-valid keys ending in a trailing newline --
+  exactly what Terraform's `file()` function produces reading an ordinary
+  `.pub` file, since nearly all end in `\n`. Root cause: OMV's real
+  validator uses PHP/PCRE, whose `$` anchor matches at the end of the
+  subject OR immediately before a single trailing newline by default; the
+  earlier Go translation used Go/RE2's default `$`, which has no such
+  allowance and only matches at the absolute end of text. Verified the
+  fix empirically rather than from memory of the spec: installed `php-cli`
+  and ran OMV's literal regex via `php -r` against a matrix of trailing-
+  newline/CRLF/whitespace cases (confirming, among other things, that OMV
+  itself accepts exactly one trailing newline but not two), then adjusted
+  the Go pattern until it produced identical results for every case.
+  Added regression tests pinning this exact scenario.
+
 - **Fixed:** a change applied cleanly (config written) but its follow-up
   `Config.applyChanges` deploy step reported failure with an underlying
   "context deadline exceeded" error, on hardware where a Salt deployment

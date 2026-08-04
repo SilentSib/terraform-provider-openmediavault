@@ -16,12 +16,27 @@ func TestSSHPublicKeyRegexp(t *testing.T) {
 		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQD user@host",
 		"sk-ssh-ed25519@openssh.com AAAAGnNr user@host",
 		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBXXXX", // comment is optional
+		// Reported bug: a key with an underscore-containing comment (a
+		// perfectly ordinary OpenSSH comment) followed by a trailing
+		// newline -- exactly what Terraform's file() function produces
+		// reading a normal .pub file, since nearly all end in "\n". Every
+		// case in this block was cross-checked against OMV's actual PHP
+		// regex via `php -r` before being pinned here (see
+		// sshPublicKeyRegexp's doc comment for why Go's default regex
+		// semantics differ from PCRE's here).
+		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQD id_rsa_omv\n",
+		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQD id_rsa_omv\r\n", // CRLF line ending
+		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQD id_rsa_omv",     // same, no trailing newline
 	}
 	invalid := []string{
 		"",
 		"not a key at all",
 		"ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBI user@host",
 		"ssh-dss AAAAB3NzaC1kc3MAAA user@host",
+		// PHP/PCRE's trailing-newline tolerance is for exactly ONE
+		// newline, not more -- confirmed against the real regex, not
+		// assumed.
+		"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQD id_rsa_omv\n\n",
 	}
 	for _, s := range valid {
 		if !sshPublicKeyRegexp.MatchString(s) {
@@ -30,7 +45,7 @@ func TestSSHPublicKeyRegexp(t *testing.T) {
 	}
 	for _, s := range invalid {
 		if sshPublicKeyRegexp.MatchString(s) {
-			t.Errorf("expected %q NOT to match (rejected by OMV, e.g. ECDSA/DSA)", s)
+			t.Errorf("expected %q NOT to match (rejected by OMV, e.g. ECDSA/DSA, or more than one trailing newline)", s)
 		}
 	}
 }
