@@ -282,6 +282,7 @@ func (p *OMVProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewSSLCertificateResource,
 		NewSSHCertificateResource,
 		NewSMBShareResource,
+		NewNFSShareResource,
 	}
 }
 

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Added `omv_nfs_share`, managing OpenMediaVault's NFS export rules
+  (`Nfs` RPC service's `getShare`/`setShare`/`deleteShare`), verified
+  against the OMV 8.5.5 source. Works meaningfully differently from
+  `omv_smb_share`: NFS is many-to-one (no uniqueness constraint on
+  `shared_folder_id` -- multiple export rules per shared folder is the
+  normal way to give different clients different rules), and creating
+  the first share for a shared folder makes OMV silently create a bind
+  mount via an internal `FsTab` call, overwriting `mntentref` on create
+  only. `mount_entry_id` is modeled as purely Computed, sending
+  `omvclient.NewObjectUUID` on create (verified this exactly matches the
+  OMV web UI's own hidden form field by reading the Angular component
+  source) and always resending the real value verbatim on update, since
+  `setShare()` doesn't re-derive it except for brand-new objects. Because
+  of the bind-mount machinery, deploying always requests `nfs`, `fstab`,
+  and `zeroconf` (confirmed `fstab` is what actually performs the mount,
+  via `engined/module/fstab.inc`), relying on `Config.applyChanges` to
+  skip whichever aren't actually dirty. Caught and fixed a real bug
+  before it shipped: `extra_options`' pattern rejects an empty string
+  (verified with `php -r` against the actual pattern, which an initial
+  test had wrongly assumed would accept one), which would have made
+  every default-configuration NFS share creation fail -- defaulted to
+  `"subtree_check,insecure"` (OMV's own suggested value) instead, and
+  also documented that the pattern's key=value syntax doesn't support
+  hyphens in values, found the same way.
+
 - Added `omv_smb_share`, managing OpenMediaVault's SMB/CIFS shares
   (`Smb` RPC service's `getShare`/`setShare`/`deleteShare`), verified
   against the OMV 8.5.5 source. Unlike `Rsync`, `getShare()`/`setShare()`

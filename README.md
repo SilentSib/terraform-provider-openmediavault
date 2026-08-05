@@ -146,6 +146,14 @@ resource "omv_smb_share" "media" {
   comment          = "Media library"
   recycle_bin      = true
 }
+
+# NFS is many-to-one: multiple omv_nfs_share resources can reference the
+# same shared_folder_id, one per client/network needing different rules.
+resource "omv_nfs_share" "media_lan" {
+  shared_folder_id = omv_shared_folder.media.id
+  client            = "192.168.1.0/24"
+  options           = "ro"
+}
 ```
 
 The `required_providers` key (`omv` above) and the `provider` block's label
@@ -254,15 +262,48 @@ This repository is groundwork, not a finished provider:
   staging it, so a failed post-delete `applyChanges` there is reported as
   a non-blocking warning instead, since the object is genuinely already
   gone.
-- **Six resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
+- **Seven resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
   `omv_workbench_settings`, `omv_ssl_certificate`, `omv_ssh_certificate`,
-  `omv_smb_share`) plus one data source (`omv_shared_folder`). Follow the
-  same pattern to add resources for users, NFS shares, filesystems, RAID,
-  etc. -- and re-verify each one's exact RPC method/field names and
-  dirtied-modules list against that service's `.inc` file the same way,
-  rather than assuming they follow `ShareMgmt`/`Rsync`'s pattern exactly
-  (some services don't use plain `get`/`set`/`delete`, e.g. `Config`
-  itself).
+  `omv_smb_share`, `omv_nfs_share`) plus one data source
+  (`omv_shared_folder`). Follow the same pattern to add resources for
+  users, filesystems, RAID, etc. -- and re-verify each one's exact RPC
+  method/field names and dirtied-modules list against that service's
+  `.inc` file the same way, rather than assuming they follow
+  `ShareMgmt`/`Rsync`'s pattern exactly (some services don't use plain
+  `get`/`set`/`delete`, e.g. `Config` itself).
+- **`omv_nfs_share` works meaningfully differently from `omv_smb_share`,
+  despite the similar name.** Verified against the OMV 8.5.5 source:
+  - NFS is many-to-one where SMB is one-to-one: a NFS "share" is really
+    one `(client, options)` export rule, and OMV places no uniqueness
+    constraint on `shared_folder_id` (no `assertIsUnique`, unlike
+    `ShareMgmt`/`Smb`) -- create multiple `omv_nfs_share` resources
+    against the same shared folder, one per client/network.
+  - Creating the *first* NFS share for a shared folder makes OMV silently
+    create a bind mount (binding the shared folder's directory into the
+    NFS export directory) via an internal call to the `FsTab` RPC
+    service, and sets `mntentref` to point at it -- overwriting whatever
+    was sent, but only on create. `mount_entry_id` is therefore modeled
+    as purely Computed: the sentinel `omvclient.NewObjectUUID` is sent on
+    create (exactly matching the OMV web UI's own hidden form field,
+    verified by reading the Angular component), and the real value is
+    always resent verbatim on update, since `setShare()` does not
+    re-derive it except on a brand-new object.
+  - Because of that bind-mount machinery, deploying a share change can
+    require the `nfs`, `fstab` (confirmed via `engined/module/fstab.inc`
+    -- this is what actually performs the bind mount on disk), and
+    `zeroconf` modules, not just `nfs`; this resource always requests all
+    three, relying on `Config.applyChanges` only acting on whichever are
+    actually dirty (verified from source).
+  - `extra_options`' pattern requires **at least one token** -- an empty
+    string is genuinely rejected by OMV's own validation (verified with
+    `php -r` against the actual pattern, not assumed from reading the
+    regex), so this resource defaults it to `"subtree_check,insecure"`
+    (matching the OMV web UI's own suggested value) rather than empty.
+    The same check also found the pattern's key=value syntax doesn't
+    support hyphens in values, so hyphenated values (e.g. a dashed UUID)
+    are rejected by OMV itself -- both are documented on the attribute
+    and covered by tests that were themselves corrected after initially
+    assuming the wrong behavior.
 - **`omv_smb_share`'s RPC calls (service `Smb`, methods `getShare`/
   `setShare`/`deleteShare`) were verified against the OMV 8.5.5 source**,
   and unlike `Rsync`, `getShare()`/`setShare()` have no shape divergence
