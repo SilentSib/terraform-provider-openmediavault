@@ -154,6 +154,13 @@ resource "omv_nfs_share" "media_lan" {
   client            = "192.168.1.0/24"
   options           = "ro"
 }
+
+resource "omv_notification_settings" "this" {
+  enabled       = true
+  smtp_server   = "smtp.example.com"
+  sender_email  = "nas@example.com"
+  primary_email = "admin@example.com"
+}
 ```
 
 The `required_providers` key (`omv` above) and the `provider` block's label
@@ -262,15 +269,35 @@ This repository is groundwork, not a finished provider:
   staging it, so a failed post-delete `applyChanges` there is reported as
   a non-blocking warning instead, since the object is genuinely already
   gone.
-- **Seven resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
+- **Eight resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
   `omv_workbench_settings`, `omv_ssl_certificate`, `omv_ssh_certificate`,
-  `omv_smb_share`, `omv_nfs_share`) plus one data source
-  (`omv_shared_folder`). Follow the same pattern to add resources for
-  users, filesystems, RAID, etc. -- and re-verify each one's exact RPC
-  method/field names and dirtied-modules list against that service's
-  `.inc` file the same way, rather than assuming they follow
-  `ShareMgmt`/`Rsync`'s pattern exactly (some services don't use plain
-  `get`/`set`/`delete`, e.g. `Config` itself).
+  `omv_smb_share`, `omv_nfs_share`, `omv_notification_settings`) plus one
+  data source (`omv_shared_folder`). Follow the same pattern to add
+  resources for users, filesystems, RAID, the per-event notification
+  toggles (a separate `Notification` RPC service/config type from
+  `omv_notification_settings`'s `EmailNotification`, not yet
+  implemented), etc. -- and re-verify each one's exact RPC method/field
+  names and dirtied-modules list against that service's `.inc` file the
+  same way, rather than assuming they follow `ShareMgmt`/`Rsync`'s
+  pattern exactly (some services don't use plain `get`/`set`/`delete`,
+  e.g. `Config` itself).
+- **`omv_notification_settings` hit the exact `Rsync`-style set()-vs-
+  get() divergence bug again, caught before shipping this time.** The
+  underlying config object stores `authentication.enable/username/
+  password` nested, but `get()` flattens them into top-level
+  `authenable`/`username`/`password` before returning -- while `set()`'s
+  response is the raw object, still nested, with no flat aliases at all.
+  Decoding `set()`'s response with the flattened struct wouldn't crash
+  (unlike `Rsync`'s array-vs-string mismatch) but would silently zero
+  out authentication fields in Terraform state after every write. Fixed
+  with the same pattern as `omv_rsync_job`: `set()`'s response is
+  discarded entirely and `get()` is called immediately after for the
+  canonical, correctly-flattened result -- with a dedicated regression
+  test asserting the post-Create state matches `get()`'s response, not
+  zeroed-out values. One field genuinely doesn't need that treatment,
+  though: unlike the certificate resources' private keys, `get()` here
+  *does* return the real `password` in plaintext (no stripping), so
+  `smtp_password` is refreshed normally on every `Read`.
 - **`omv_nfs_share` works meaningfully differently from `omv_smb_share`,
   despite the similar name.** Verified against the OMV 8.5.5 source:
   - NFS is many-to-one where SMB is one-to-one: a NFS "share" is really

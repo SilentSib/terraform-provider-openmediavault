@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Added `omv_notification_settings`, managing System > Notifications >
+  Settings (outgoing SMTP configuration for system email notifications)
+  via the `EmailNotification` RPC service's `get`/`set`, verified against
+  the OMV 8.5.5 source. Singleton, same pattern as
+  `omv_workbench_settings` (fixed synthetic id, no real delete). Hit --
+  and this time caught before shipping, thanks to now habitually reading
+  both `get()` and `set()` in full before writing any decode code -- the
+  exact same class of bug `omv_rsync_job` shipped with initially: `get()`
+  flattens the config object's nested `authentication.enable/username/
+  password` into top-level fields before returning, but `set()`'s
+  response is the raw, still-nested object with no flat aliases. Fixed
+  proactively with the established `set()`-then-`get()`-refetch pattern,
+  with a dedicated regression test asserting post-Create state matches
+  what `get()` actually returns rather than silently zeroed-out
+  authentication fields. Also note: unlike the certificate resources,
+  `get()` here does return the real `password` value in plaintext (no
+  server-side stripping), so `smtp_password` is refreshed normally on
+  every `Read` -- confirmed from source, not assumed by analogy with the
+  cert resources' different behavior.
+
 - Added `omv_nfs_share`, managing OpenMediaVault's NFS export rules
   (`Nfs` RPC service's `getShare`/`setShare`/`deleteShare`), verified
   against the OMV 8.5.5 source. Works meaningfully differently from
