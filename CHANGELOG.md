@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Added `omv_notification_event`, managing the per-event notification
+  toggles on System > Notifications' main list (the `Notification` RPC
+  service, distinct from `omv_notification_settings`'s
+  `EmailNotification`), verified against the OMV 8.5.5 source. This one
+  works structurally differently from every other resource in this
+  provider: the set of valid `event_id` values isn't in any datamodel --
+  it's discovered at runtime from every engine module implementing
+  `INotification`. Compiled the complete, verified list for stock OMV
+  8.5.5 by grepping every `engined/module/*.inc` for
+  `getNotificationConfig()`'s `"id"` entries (`authentication`, `misc`,
+  `monitprocevents`, `monitloadavg`, `monitcpuusage`,
+  `monitmemoryusage`, `monitfilesystems`, `apt`, `smartmontools`) rather
+  than leaving it to guesswork or asking users to reverse-engineer the
+  UI. `Create`/`ImportState` fetch the full list and filter client-side
+  (there's no get-by-event_id RPC method), and must correctly distinguish
+  a never-configured event (UUID `""`, confirmed via `ConfigObject`'s
+  generic default) from an already-existing one and adopt the latter's
+  UUID rather than risk a duplicate, since `set()` has no uniqueness
+  constraint on `id` -- both branches covered by tests, since getting
+  this wrong would have been a real, silent data-integrity bug. `Delete`
+  resets `enable` to `false` rather than leaving state untouched (unlike
+  the singleton settings resources), since "disabled" is an unambiguous
+  safe value here in a way port/SSL/SMTP settings aren't.
+
 - Added `omv_notification_settings`, managing System > Notifications >
   Settings (outgoing SMTP configuration for system email notifications)
   via the `EmailNotification` RPC service's `get`/`set`, verified against

@@ -39,7 +39,7 @@ func TestResourceTypeNamesMatchOMVPrefix(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	want := []string{"omv_nfs_share", "omv_notification_settings", "omv_rsync_job", "omv_shared_folder", "omv_smb_share", "omv_ssh_certificate", "omv_ssl_certificate", "omv_workbench_settings"}
+	want := []string{"omv_nfs_share", "omv_notification_event", "omv_notification_settings", "omv_rsync_job", "omv_shared_folder", "omv_smb_share", "omv_ssh_certificate", "omv_ssl_certificate", "omv_workbench_settings"}
 	if len(got) != len(want) {
 		t.Fatalf("unexpected resource type set: got %v, want %v", got, want)
 	}

@@ -284,6 +284,7 @@ func (p *OMVProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewSMBShareResource,
 		NewNFSShareResource,
 		NewNotificationSettingsResource,
+		NewNotificationEventResource,
 	}
 }
 

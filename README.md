@@ -161,6 +161,11 @@ resource "omv_notification_settings" "this" {
   sender_email  = "nas@example.com"
   primary_email = "admin@example.com"
 }
+
+resource "omv_notification_event" "smart" {
+  event_id = "smartmontools"
+  enabled  = true
+}
 ```
 
 The `required_providers` key (`omv` above) and the `provider` block's label
@@ -269,18 +274,50 @@ This repository is groundwork, not a finished provider:
   staging it, so a failed post-delete `applyChanges` there is reported as
   a non-blocking warning instead, since the object is genuinely already
   gone.
-- **Eight resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
+- **Nine resources exist so far** (`omv_shared_folder`, `omv_rsync_job`,
   `omv_workbench_settings`, `omv_ssl_certificate`, `omv_ssh_certificate`,
-  `omv_smb_share`, `omv_nfs_share`, `omv_notification_settings`) plus one
-  data source (`omv_shared_folder`). Follow the same pattern to add
-  resources for users, filesystems, RAID, the per-event notification
-  toggles (a separate `Notification` RPC service/config type from
-  `omv_notification_settings`'s `EmailNotification`, not yet
-  implemented), etc. -- and re-verify each one's exact RPC method/field
-  names and dirtied-modules list against that service's `.inc` file the
-  same way, rather than assuming they follow `ShareMgmt`/`Rsync`'s
-  pattern exactly (some services don't use plain `get`/`set`/`delete`,
-  e.g. `Config` itself).
+  `omv_smb_share`, `omv_nfs_share`, `omv_notification_settings`,
+  `omv_notification_event`) plus one data source (`omv_shared_folder`).
+  Follow the same pattern to add resources for users, filesystems, RAID,
+  etc. -- and re-verify each one's exact RPC method/field names and
+  dirtied-modules list against that service's `.inc` file the same way,
+  rather than assuming they follow `ShareMgmt`/`Rsync`'s pattern exactly
+  (some services don't use plain `get`/`set`/`delete`, e.g. `Config`
+  itself).
+- **`omv_notification_event`'s valid `event_id` values are not fixed or
+  enumerable from any datamodel** -- they're discovered at runtime from
+  whichever engine modules implement `INotification`. Verified the
+  complete list on stock OMV 8.5.5 by grepping every
+  `engined/module/*.inc` for `getNotificationConfig()`'s `"id"` entries
+  rather than guessing or scraping the UI: `authentication`, `misc`
+  (hardcoded built-ins) plus `monitprocevents`, `monitloadavg`,
+  `monitcpuusage`, `monitmemoryusage`, `monitfilesystems`, `apt`,
+  `smartmontools` (module-provided). Installed plugins can add more.
+  Three things worth knowing about this resource's design:
+  1. There's no "get by event_id" RPC method, only by UUID -- `Create`
+     and `ImportState` fetch the whole list (`getList()`) and filter
+     client-side, then must correctly distinguish "no persisted object
+     yet" (UUID is `""`, confirmed via `ConfigObject`'s generic
+     type-based default) from "one already exists" (e.g. toggled via the
+     web UI) and adopt the existing UUID rather than risk creating a
+     duplicate -- `set()` has no uniqueness constraint on `id`, unlike
+     `ShareMgmt`/`Smb`'s `assertIsUnique` elsewhere in this provider.
+     Both branches are covered by tests.
+  2. There's no per-object delete RPC at all. Unlike the singleton
+     settings resources (where leaving OMV's settings untouched on
+     `Delete` is the safe choice), "disabled" is a clear, well-defined
+     safe state for a notification toggle, so `Delete` here resets
+     `enable` to `false` instead -- a deliberately different choice from
+     the settings singletons, documented as such in the source.
+  3. `terraform import` uses `event_id` (e.g. `"smartmontools"`), not
+     OMV's UUID, since nobody has the latter memorized -- this needed a
+     custom `ImportState` (the usual UUID-passthrough pattern used
+     elsewhere in this provider doesn't apply when the import identifier
+     isn't the resource's own `id`). Importing an `event_id` OMV
+     recognizes but has no persisted object for yet fails with a message
+     pointing at `terraform apply` instead, rather than silently
+     creating one as a side effect of what's supposed to be a read-only
+     operation.
 - **`omv_notification_settings` hit the exact `Rsync`-style set()-vs-
   get() divergence bug again, caught before shipping this time.** The
   underlying config object stores `authentication.enable/username/
