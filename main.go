@@ -31,7 +31,7 @@ func main() {
 		// Address must match the "source" configured for this provider
 		// in Terraform configurations (registry.terraform.io/<namespace>/openmediavault).
 		// Update the namespace below once this provider is published.
-		Address: "registry.terraform.io/example/openmediavault",
+		Address: "registry.terraform.io/SilentSib/openmediavault",
 		Debug:   debug,
 	})
 	if err != nil {
