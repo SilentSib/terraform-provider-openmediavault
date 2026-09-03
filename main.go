@@ -8,9 +8,7 @@ import (
 	"context"
 	"flag"
 	"log"
-
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
-
 	"github.com/example/terraform-provider-openmediavault/internal/provider"
 )
 
